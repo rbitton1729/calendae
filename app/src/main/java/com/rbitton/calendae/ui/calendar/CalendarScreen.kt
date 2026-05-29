@@ -55,6 +55,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -108,11 +109,14 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
     val foldState = rememberFoldState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
     val zone = ZoneId.systemDefault()
 
     var panel by remember { mutableStateOf<Panel?>(null) }
     // Month paging direction: +1 slides the new page in from the right, -1 from the left.
     var navDirection by remember { mutableIntStateOf(1) }
+    // Bumped when the split pill is dragged closed, asking an open editor to commit.
+    var commitSignal by remember { mutableIntStateOf(0) }
 
     // Unfolded (a real book/tabletop spread) => content splits at the hinge, never a popup.
     val splitMode = foldState.isBook || foldState.isTabletop
@@ -197,17 +201,29 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
         viewModel.selectDate(event.startDate(zone))
         panel = Panel.Editor(event)
     }
+    // Dragging the split pill shut: editors save (handled via the signal), the
+    // calendars list just closes.
+    val collapsePanel: () -> Unit = {
+        when (panel) {
+            is Panel.Editor -> commitSignal++
+            Panel.Calendars -> panel = null
+            null -> Unit
+        }
+    }
 
-    // When an event opens the split editor in week view, center its day in the left page.
-    val centeredEventId = (panel as? Panel.Editor)?.event?.id
-    LaunchedEffect(centeredEventId, splitMode, isWeek) {
-        val event = (panel as? Panel.Editor)?.event
-        if (event != null && isWeek && splitMode) {
-            val index = indexOf(event.startDate(zone))
-            weekListState.scrollToItem(index)
+    // When an event opens the split editor in week view, center its DAY in the left
+    // page. Keyed on the date (not the event) so switching events on the same day
+    // doesn't move the timeline.
+    val centeredDate = (panel as? Panel.Editor)?.event?.startDate(zone)
+    LaunchedEffect(centeredDate, splitMode, isWeek) {
+        if (centeredDate != null && isWeek && splitMode) {
+            // Let the split layout settle so we read the half-width viewport, not the full one.
+            withFrameNanos {}
+            val index = indexOf(centeredDate)
             val info = weekListState.layoutInfo
-            val itemPx = info.visibleItemsInfo.firstOrNull { it.index == index }?.size ?: 0
             val viewport = info.viewportEndOffset - info.viewportStartOffset
+            val itemPx = with(density) { WeekDayWidth.toPx() }.toInt()
+            // Single smooth scroll (no instant pre-jump) to center the day column.
             weekListState.animateScrollToItem(index, -((viewport - itemPx) / 2))
         }
     }
@@ -266,24 +282,37 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
             )
         }
 
+        // The second page when unfolded: an open panel, else the day agenda (month
+        // only). Null in week view with no panel => the timeline fills the screen.
+        val secondPage: (@Composable () -> Unit)? = when {
+            panel != null -> {
+                {
+                    PanelPane(
+                        panel!!, state, editorDate, commitSignal,
+                        dismissPanel, saveEvent, deleteEvent, viewModel::setCalendarEnabled,
+                    )
+                }
+            }
+            !isWeek -> agenda
+            else -> null
+        }
+
         Box(Modifier.padding(padding).fillMaxSize()) {
             when {
                 !state.hasPermission ->
                     PermissionGate(onGrant = { permissionLauncher.launch(CalendarPermissions) })
 
-                // Unfolded with a panel open: calendar on one page, panel on the other.
-                splitMode && panel != null -> SplitPane(
+                // Unfolded: primary stays mounted; the second page is added/removed in place.
+                splitMode -> SplitPane(
                     foldState,
                     first = { if (isWeek) weekTimeline(Modifier.fillMaxSize()) else monthGrid(Modifier.fillMaxSize()) },
-                    second = {
-                        PanelPane(panel!!, state, editorDate, dismissPanel, saveEvent, deleteEvent, viewModel::setCalendarEnabled)
-                    },
+                    second = secondPage,
+                    // Drag-to-close only in week view; in month the agenda is always the second pane.
+                    onSecondCollapsed = if (panel != null && isWeek) collapsePanel else null,
                 )
 
+                // Folded phone week: full timeline (panel shows as a popup).
                 isWeek -> weekTimeline(Modifier.fillMaxSize())
-
-                // Unfolded month, no panel: month grid on one page, agenda on the other.
-                splitMode -> SplitPane(foldState, { monthGrid(Modifier.fillMaxSize()) }, agenda)
 
                 // Folded phone month: month grid stacked above the agenda.
                 else -> Column(Modifier.fillMaxSize()) {
@@ -327,6 +356,7 @@ private fun PanelPane(
     panel: Panel,
     state: CalendarUiState,
     editorDate: LocalDate,
+    commitSignal: Int,
     onDismiss: () -> Unit,
     onSave: (String, LocalTime, LocalTime, Long?) -> Unit,
     onDelete: () -> Unit,
@@ -338,6 +368,7 @@ private fun PanelPane(
                 date = editorDate,
                 event = panel.event,
                 writableCalendars = state.calendars.filter { it.isWritable },
+                commitSignal = commitSignal,
                 onDismiss = onDismiss,
                 onSave = onSave,
                 onDelete = onDelete,
@@ -441,7 +472,8 @@ private fun CalendarTopBar(
 private fun SplitPane(
     foldState: FoldState,
     first: @Composable () -> Unit,
-    second: @Composable () -> Unit,
+    second: (@Composable () -> Unit)?,
+    onSecondCollapsed: (() -> Unit)? = null,
 ) {
     val isTabletop = foldState.isTabletop
     val density = LocalDensity.current
@@ -452,6 +484,10 @@ private fun SplitPane(
         val gutter = maxOf(hingeThickness, 28.dp) // wide enough to grab
         val minPane = 140.dp
         val maxFirst = (total - gutter - minPane).coerceAtLeast(minPane)
+        // When collapsible, allow over-dragging the second pane below its minimum.
+        val collapsible = onSecondCollapsed != null
+        val collapseThreshold = 90.dp
+        val maxDrag = if (collapsible) (total - gutter).coerceAtLeast(minPane) else maxFirst
 
         // Initial split: gutter centered on the hinge, else an even split. Reset on refold.
         val initialFirst = remember(foldState.hingePositionPx, isTabletop, total) {
@@ -459,26 +495,47 @@ private fun SplitPane(
             (hingeStart ?: (total - gutter) / 2).coerceIn(minPane, maxFirst)
         }
         var firstSize by remember(foldState.hingePositionPx, isTabletop) { mutableStateOf(initialFirst) }
-        val clamped = firstSize.coerceIn(minPane, maxFirst)
+        val clamped = firstSize.coerceIn(minPane, maxDrag)
+
+        // Reset the split once the second pane is gone (after a collapse-close), so it
+        // never resizes while still visible (which looked like a halfway flash).
+        val hasSecond = second != null
+        LaunchedEffect(hasSecond) { if (!hasSecond) firstSize = initialFirst }
 
         // Accumulate onto the current size (not the captured `clamped`, which is stale
         // inside the long-lived gesture coroutine and makes the handle jump).
         val onDrag: (Float) -> Unit = { deltaPx ->
             val delta = with(density) { deltaPx.toDp() }
-            firstSize = (firstSize + delta).coerceIn(minPane, maxFirst)
+            firstSize = (firstSize + delta).coerceIn(minPane, maxDrag)
+        }
+        val onDragEnd: () -> Unit = {
+            val secondSize = total - gutter - firstSize
+            // Just close; the size resets invisibly once the second pane is gone.
+            if (collapsible && secondSize < collapseThreshold) onSecondCollapsed!!()
+            else firstSize = firstSize.coerceIn(minPane, maxFirst) // snap back from the collapse zone
         }
 
+        // `first` is always the leading child (single call site) so it never re-mounts
+        // when the second page is added/removed — only its size modifier changes.
         if (isTabletop) {
             Column(Modifier.fillMaxSize()) {
-                Box(Modifier.fillMaxWidth().height(clamped)) { first() }
-                Gutter(isRow = false, thickness = gutter, onDrag = onDrag)
-                Box(Modifier.fillMaxWidth().weight(1f)) { second() }
+                val firstMod = if (second != null) Modifier.fillMaxWidth().height(clamped)
+                else Modifier.fillMaxWidth().weight(1f)
+                Box(firstMod) { first() }
+                if (second != null) {
+                    Gutter(isRow = false, thickness = gutter, onDrag = onDrag, onDragEnd = onDragEnd)
+                    Box(Modifier.fillMaxWidth().weight(1f)) { second() }
+                }
             }
         } else {
             Row(Modifier.fillMaxSize()) {
-                Box(Modifier.width(clamped).fillMaxHeight()) { first() }
-                Gutter(isRow = true, thickness = gutter, onDrag = onDrag)
-                Box(Modifier.weight(1f).fillMaxHeight()) { second() }
+                val firstMod = if (second != null) Modifier.width(clamped).fillMaxHeight()
+                else Modifier.weight(1f).fillMaxHeight()
+                Box(firstMod) { first() }
+                if (second != null) {
+                    Gutter(isRow = true, thickness = gutter, onDrag = onDrag, onDragEnd = onDragEnd)
+                    Box(Modifier.weight(1f).fillMaxHeight()) { second() }
+                }
             }
         }
     }
@@ -486,7 +543,7 @@ private fun SplitPane(
 
 /** A draggable divider with a white-transparent pill handle in its center. */
 @Composable
-private fun Gutter(isRow: Boolean, thickness: Dp, onDrag: (Float) -> Unit) {
+private fun Gutter(isRow: Boolean, thickness: Dp, onDrag: (Float) -> Unit, onDragEnd: () -> Unit) {
     val sizeModifier = if (isRow) Modifier.width(thickness).fillMaxHeight()
     else Modifier.height(thickness).fillMaxWidth()
     val pill = if (isRow) Modifier.size(width = 4.dp, height = 40.dp)
@@ -494,8 +551,13 @@ private fun Gutter(isRow: Boolean, thickness: Dp, onDrag: (Float) -> Unit) {
 
     Box(
         sizeModifier.pointerInput(isRow) {
-            if (isRow) detectHorizontalDragGestures { _, dragAmount -> onDrag(dragAmount) }
-            else detectVerticalDragGestures { _, dragAmount -> onDrag(dragAmount) }
+            if (isRow) detectHorizontalDragGestures(
+                onDragEnd = onDragEnd,
+                onHorizontalDrag = { _, dragAmount -> onDrag(dragAmount) },
+            ) else detectVerticalDragGestures(
+                onDragEnd = onDragEnd,
+                onVerticalDrag = { _, dragAmount -> onDrag(dragAmount) },
+            )
         },
         contentAlignment = Alignment.Center,
     ) {

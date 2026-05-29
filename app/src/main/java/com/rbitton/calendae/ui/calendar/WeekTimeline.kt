@@ -51,7 +51,9 @@ import kotlin.math.min
 
 private val HourHeight = 56.dp
 private val AxisWidth = 44.dp
-private val DayWidth = 84.dp
+/** Width of one day column; referenced by the screen to center a day. */
+internal val WeekDayWidth = 84.dp
+private val DayWidth = WeekDayWidth
 private val HeaderHeight = 50.dp
 private val AllDayHeight = 28.dp
 private const val Hours = 24
@@ -272,10 +274,14 @@ private fun HourAxis() {
 
 @Composable
 private fun HourLines() {
+    val color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
     Column(Modifier.fillMaxSize()) {
+        // Each row is exactly HourHeight; the divider is overlaid at its top so it
+        // adds no height (otherwise lines drift below the labels by 1dp per hour).
         repeat(Hours) {
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
-            Spacer(Modifier.height(HourHeight))
+            Box(Modifier.fillMaxWidth().height(HourHeight)) {
+                HorizontalDivider(color = color)
+            }
         }
     }
 }

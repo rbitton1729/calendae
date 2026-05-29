@@ -28,6 +28,7 @@ import androidx.compose.material3.TimeInput
 import androidx.compose.material3.TimePicker
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -158,6 +159,7 @@ fun EventEditorPaneContent(
     date: LocalDate,
     event: CalendarEvent?,
     writableCalendars: List<CalendarInfo>,
+    commitSignal: Int,
     onDismiss: () -> Unit,
     onSave: (title: String, start: LocalTime, end: LocalTime, calendarId: Long?) -> Unit,
     onDelete: () -> Unit,
@@ -173,6 +175,20 @@ fun EventEditorPaneContent(
     var start by remember(event?.id) { mutableStateOf(event?.startTime(zone) ?: LocalTime.now().withMinute(0)) }
     var end by remember(event?.id) { mutableStateOf(event?.endTime(zone) ?: start.plusHours(1)) }
     var editing by remember(event?.id) { mutableStateOf(TimeField.NONE) }
+
+    // Dragging the split pill shut commits the editor (save if titled, else discard).
+    // Baseline avoids firing for a freshly-opened editor that inherits a raised signal.
+    val commitBaseline = remember(event?.id) { commitSignal }
+    LaunchedEffect(commitSignal) {
+        if (commitSignal > commitBaseline) {
+            if (title.isNotBlank()) {
+                val safeEnd = if (end.isAfter(start)) end else start.plusHours(1)
+                onSave(title.trim(), start, safeEnd, calendarId)
+            } else {
+                onDismiss()
+            }
+        }
+    }
 
     Column(Modifier.fillMaxSize().padding(20.dp)) {
         Text(

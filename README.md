@@ -7,20 +7,25 @@ when folded or on a phone.
 
 ## Design
 
-- **Book spread:** when the device reports a vertical fold, the UI splits into
-  two facing pages with the gutter aligned to the physical hinge.
+- **Book spread:** a vertical fold splits the UI into two facing pages with the
+  gutter aligned to the physical hinge. A horizontal fold (tabletop) splits
+  top/bottom instead. No fold → single pane / even split.
 - **Month + Day:** left page is the month grid; tapping a date fills the right
-  page with that day's events.
+  page with that day's events. Tap an event to edit or delete it; the FAB adds.
+- **Week spread:** a second view mode — an hour grid with day columns, split
+  across the hinge in book posture. Toggle Month/Week from the top bar.
 - **System calendar:** events are read from and written to the device's
-  calendars via `CalendarContract` (requires `READ_/WRITE_CALENDAR`).
+  calendars via `CalendarContract` (requires `READ_/WRITE_CALENDAR`). The
+  Calendars dialog toggles per-calendar visibility and acts as a color legend.
 
 ## Architecture
 
 ```
-ui/calendar/   CalendarScreen (book spread + single-pane fallback + permission gate),
-               CalendarViewModel, MonthGrid, DayAgenda, AddEventDialog
+ui/calendar/   CalendarScreen (posture- + view-mode-aware host, permission gate),
+               CalendarViewModel, MonthGrid, DayAgenda, WeekGrid,
+               EventEditorDialog (add/edit/delete), CalendarsDialog
 fold/          FoldState + rememberFoldState() — WindowInfoTracker hinge detection
-data/          CalendarEvent, CalendarRepository (CalendarContract reads/writes)
+data/          CalendarEvent, CalendarInfo, CalendarRepository (CalendarContract)
 ```
 
 Jetpack Compose + Material 3, MVVM, `androidx.window` for posture detection.

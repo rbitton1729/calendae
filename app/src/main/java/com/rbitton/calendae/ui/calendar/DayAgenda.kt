@@ -23,7 +23,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.rbitton.calendae.data.CalendarEvent
@@ -46,6 +45,7 @@ private val TimeFormat: DateTimeFormatter =
 fun DayAgenda(
     date: LocalDate,
     events: List<CalendarEvent>,
+    onEventClick: (CalendarEvent) -> Unit,
     modifier: Modifier = Modifier,
     zone: ZoneId = ZoneId.systemDefault(),
 ) {
@@ -67,7 +67,7 @@ fun DayAgenda(
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(events, key = { it.id }) { event ->
-                    EventRow(event, zone)
+                    EventRow(event, zone, onClick = { onEventClick(event) })
                 }
             }
         }
@@ -75,8 +75,9 @@ fun DayAgenda(
 }
 
 @Composable
-private fun EventRow(event: CalendarEvent, zone: ZoneId) {
+private fun EventRow(event: CalendarEvent, zone: ZoneId, onClick: () -> Unit) {
     Surface(
+        onClick = onClick,
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth(),
@@ -86,7 +87,7 @@ private fun EventRow(event: CalendarEvent, zone: ZoneId) {
                 Modifier
                     .size(width = 4.dp, height = 36.dp)
                     .clip(CircleShape)
-                    .background(eventColor(event)),
+                    .background(swatchColor(event.color)),
             )
             Spacer(Modifier.width(12.dp))
             Column {
@@ -108,7 +109,3 @@ private fun EventRow(event: CalendarEvent, zone: ZoneId) {
 private fun timeLabel(event: CalendarEvent, zone: ZoneId): String =
     if (event.allDay) "All day"
     else "${event.startTime(zone).format(TimeFormat)} – ${event.endTime(zone).format(TimeFormat)}"
-
-private fun eventColor(event: CalendarEvent): Color =
-    if (event.color != 0) Color(0xFF000000 or (event.color.toLong() and 0xFFFFFF))
-    else Color(0xFF6650A4)

@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
@@ -20,13 +21,13 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -43,7 +44,9 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.rbitton.calendae.data.CalendarEvent
 import com.rbitton.calendae.fold.FoldState
+import com.rbitton.calendae.fold.Posture
 import com.rbitton.calendae.fold.rememberFoldState
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -51,6 +54,11 @@ import java.util.Locale
 
 private val MonthTitleFormat: DateTimeFormatter =
     DateTimeFormatter.ofPattern("MMMM yyyy", Locale.getDefault())
+private val WeekTitleDay: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
+
+// In book posture the week is split 4 days / 3 days across the hinge.
+private const val WEEK_LEFT_DAYS = 4
 
 private val CalendarPermissions = arrayOf(
     Manifest.permission.READ_CALENDAR,
@@ -63,7 +71,10 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val foldState = rememberFoldState()
     val context = LocalContext.current
-    var showAddDialog by remember { mutableStateOf(false) }
+
+    var editorOpen by remember { mutableStateOf(false) }
+    var editingEvent by remember { mutableStateOf<CalendarEvent?>(null) }
+    var calendarsOpen by remember { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -71,7 +82,6 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
         viewModel.onPermissionResult(result[Manifest.permission.READ_CALENDAR] == true)
     }
 
-    // Reflect any permission already granted on (re)entry, before prompting.
     LaunchedEffect(Unit) {
         val granted = ContextCompat.checkSelfPermission(
             context, Manifest.permission.READ_CALENDAR,
@@ -81,125 +91,222 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text(state.visibleMonth.format(MonthTitleFormat)) },
-                actions = {
-                    IconButton(onClick = viewModel::previousMonth) {
-                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "Previous month")
-                    }
-                    TextButton(onClick = viewModel::goToToday) { Text("Today") }
-                    IconButton(onClick = viewModel::nextMonth) {
-                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Next month")
-                    }
+            CalendarTopBar(
+                state = state,
+                onPrevious = viewModel::goPrevious,
+                onNext = viewModel::goNext,
+                onToday = viewModel::goToToday,
+                onToggleView = {
+                    viewModel.setViewMode(
+                        if (state.viewMode == ViewMode.MONTH) ViewMode.WEEK else ViewMode.MONTH,
+                    )
                 },
+                onOpenCalendars = { calendarsOpen = true },
             )
         },
         floatingActionButton = {
             if (state.hasPermission) {
-                FloatingActionButton(onClick = { showAddDialog = true }) {
+                FloatingActionButton(onClick = { editingEvent = null; editorOpen = true }) {
                     Icon(Icons.Filled.Add, "Add event")
                 }
             }
         },
     ) { padding ->
-        when {
-            !state.hasPermission -> PermissionGate(
-                onGrant = { permissionLauncher.launch(CalendarPermissions) },
-                modifier = Modifier.padding(padding),
-            )
-
-            foldState.isBookSpread -> BookSpread(
-                foldState = foldState,
-                left = { MonthPage(state, viewModel) },
-                right = { DayAgenda(state.selectedDate, state.selectedDayEvents) },
-                modifier = Modifier.padding(padding),
-            )
-
-            else -> SinglePane(state, viewModel, Modifier.padding(padding))
+        val onEventClick: (CalendarEvent) -> Unit = { editingEvent = it; editorOpen = true }
+        Box(Modifier.padding(padding)) {
+            when {
+                !state.hasPermission -> PermissionGate(
+                    onGrant = { permissionLauncher.launch(CalendarPermissions) },
+                )
+                state.viewMode == ViewMode.WEEK -> WeekView(state, foldState, viewModel, onEventClick)
+                else -> MonthView(state, foldState, viewModel, onEventClick)
+            }
         }
     }
 
-    if (showAddDialog) {
-        AddEventDialog(
+    if (editorOpen) {
+        EventEditorDialog(
             date = state.selectedDate,
-            onDismiss = { showAddDialog = false },
-            onConfirm = { title, start, end ->
-                viewModel.addEvent(title, state.selectedDate, start, end)
-                showAddDialog = false
+            event = editingEvent,
+            writableCalendars = state.calendars.filter { it.isWritable },
+            onDismiss = { editorOpen = false },
+            onSave = { title, start, end, calendarId ->
+                val event = editingEvent
+                if (event == null) viewModel.addEvent(title, state.selectedDate, start, end, calendarId)
+                else viewModel.updateEvent(event.id, title, state.selectedDate, start, end)
+                editorOpen = false
             },
+            onDelete = {
+                editingEvent?.let { viewModel.deleteEvent(it.id) }
+                editorOpen = false
+            },
+        )
+    }
+
+    if (calendarsOpen) {
+        CalendarsDialog(
+            calendars = state.calendars,
+            enabledIds = state.enabledCalendarIds,
+            onToggle = viewModel::setCalendarEnabled,
+            onDismiss = { calendarsOpen = false },
         )
     }
 }
 
-/** The month grid sized to fill its page, wrapping the [MonthGrid] with state plumbing. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MonthPage(state: CalendarUiState, viewModel: CalendarViewModel) {
-    MonthGrid(
-        month = state.visibleMonth,
-        selectedDate = state.selectedDate,
-        today = LocalDate.now(),
-        daysWithEvents = state.eventsByDate.keys,
-        onDateClick = viewModel::selectDate,
-        modifier = Modifier.fillMaxSize().padding(vertical = 8.dp),
+private fun CalendarTopBar(
+    state: CalendarUiState,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onToday: () -> Unit,
+    onToggleView: () -> Unit,
+    onOpenCalendars: () -> Unit,
+) {
+    androidx.compose.material3.TopAppBar(
+        title = { Text(state.title()) },
+        actions = {
+            TextButton(onClick = onToggleView) {
+                Text(if (state.viewMode == ViewMode.MONTH) "Week" else "Month")
+            }
+            if (state.calendars.size > 1) {
+                TextButton(onClick = onOpenCalendars) { Text("Calendars") }
+            }
+            IconButton(onClick = onPrevious) {
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "Previous")
+            }
+            TextButton(onClick = onToday) { Text("Today") }
+            IconButton(onClick = onNext) {
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Next")
+            }
+        },
     )
 }
 
-/**
- * Two facing pages with the gutter aligned to the physical hinge when one is
- * reported; otherwise an even split with a divider.
- */
-@Composable
-private fun BookSpread(
-    foldState: FoldState,
-    left: @Composable () -> Unit,
-    right: @Composable () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(modifier = modifier.fillMaxSize()) {
-        val hingeStart = foldState.hingeStartPx
-        if (hingeStart == null) {
-            Box(Modifier.weight(1f)) { left() }
-            VerticalDivider()
-            Box(Modifier.weight(1f)) { right() }
-        } else {
-            val density = LocalDensity.current
-            val leftWidth = with(density) { hingeStart.toDp() }
-            val gutterWidth = with(density) { foldState.hingeWidthPx.toDp() }
-            Box(Modifier.width(leftWidth)) { left() }
-            Spacer(Modifier.width(gutterWidth))
-            Box(Modifier.weight(1f)) { right() }
-        }
+private fun CalendarUiState.title(): String = when (viewMode) {
+    ViewMode.MONTH -> visibleMonth.format(MonthTitleFormat)
+    ViewMode.WEEK -> {
+        val start = weekStart
+        val end = weekStart.plusDays(6)
+        "${start.format(WeekTitleDay)} – ${end.format(WeekTitleDay)}"
     }
 }
 
-/** Folded / phone layout: month grid stacked above the selected day's agenda. */
 @Composable
-private fun SinglePane(
+private fun MonthView(
     state: CalendarUiState,
+    foldState: FoldState,
     viewModel: CalendarViewModel,
-    modifier: Modifier = Modifier,
+    onEventClick: (CalendarEvent) -> Unit,
 ) {
-    Column(modifier = modifier.fillMaxSize()) {
+    val month = @Composable {
         MonthGrid(
             month = state.visibleMonth,
             selectedDate = state.selectedDate,
             today = LocalDate.now(),
             daysWithEvents = state.eventsByDate.keys,
             onDateClick = viewModel::selectDate,
-            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            modifier = Modifier.fillMaxSize().padding(vertical = 8.dp),
         )
-        androidx.compose.material3.HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+    }
+    val agenda = @Composable {
         DayAgenda(
             date = state.selectedDate,
             events = state.selectedDayEvents,
-            modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 8.dp),
+            onEventClick = onEventClick,
+            modifier = Modifier.fillMaxSize().padding(top = 8.dp),
         )
+    }
+
+    when (foldState.posture) {
+        Posture.BOOK, Posture.TABLETOP -> HingeSpread(foldState, month, agenda)
+        Posture.FLAT -> Column(Modifier.fillMaxSize()) {
+            Box(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                MonthGrid(
+                    month = state.visibleMonth,
+                    selectedDate = state.selectedDate,
+                    today = LocalDate.now(),
+                    daysWithEvents = state.eventsByDate.keys,
+                    onDateClick = viewModel::selectDate,
+                )
+            }
+            HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+            Box(Modifier.fillMaxWidth().weight(1f)) { agenda() }
+        }
     }
 }
 
 @Composable
-private fun PermissionGate(onGrant: () -> Unit, modifier: Modifier = Modifier) {
-    Box(modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+private fun WeekView(
+    state: CalendarUiState,
+    foldState: FoldState,
+    viewModel: CalendarViewModel,
+    onEventClick: (CalendarEvent) -> Unit,
+) {
+    val density = LocalDensity.current
+    val splitLeftDays = if (foldState.isBook) WEEK_LEFT_DAYS else null
+    val gutter = if (foldState.isBook) {
+        with(density) { foldState.hingeThicknessPx.toDp() }
+    } else 0.dp
+
+    WeekGrid(
+        days = state.weekDays,
+        eventsByDate = state.eventsByDate,
+        selectedDate = state.selectedDate,
+        today = LocalDate.now(),
+        onDayClick = viewModel::selectDate,
+        onEventClick = onEventClick,
+        leftDays = splitLeftDays,
+        gutterWidth = gutter,
+        modifier = Modifier.fillMaxSize(),
+    )
+}
+
+/**
+ * Two pages with the gutter aligned to the physical hinge: a Row for a book
+ * (vertical) fold, a Column for a tabletop (horizontal) fold. Falls back to an
+ * even split with a divider when no hinge position is reported.
+ */
+@Composable
+private fun HingeSpread(
+    foldState: FoldState,
+    first: @Composable () -> Unit,
+    second: @Composable () -> Unit,
+) {
+    val density = LocalDensity.current
+    val position = foldState.hingePositionPx
+    val thickness = with(density) { foldState.hingeThicknessPx.toDp() }
+
+    if (foldState.isTabletop) {
+        Column(Modifier.fillMaxSize()) {
+            if (position == null) {
+                Box(Modifier.fillMaxWidth().weight(1f)) { first() }
+                HorizontalDivider()
+                Box(Modifier.fillMaxWidth().weight(1f)) { second() }
+            } else {
+                Box(Modifier.fillMaxWidth().height(with(density) { position.toDp() })) { first() }
+                Spacer(Modifier.height(thickness))
+                Box(Modifier.fillMaxWidth().weight(1f)) { second() }
+            }
+        }
+    } else {
+        Row(Modifier.fillMaxSize()) {
+            if (position == null) {
+                Box(Modifier.weight(1f)) { first() }
+                VerticalDivider()
+                Box(Modifier.weight(1f)) { second() }
+            } else {
+                Box(Modifier.width(with(density) { position.toDp() })) { first() }
+                Spacer(Modifier.width(thickness))
+                Box(Modifier.weight(1f)) { second() }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PermissionGate(onGrant: () -> Unit) {
+    Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp),

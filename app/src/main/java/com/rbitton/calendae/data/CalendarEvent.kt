@@ -13,6 +13,7 @@ import java.time.ZoneId
  */
 data class CalendarEvent(
     val id: Long,
+    val calendarId: Long,
     val title: String,
     val startMillis: Long,
     val endMillis: Long,

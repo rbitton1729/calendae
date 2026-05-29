@@ -24,13 +24,17 @@ class CalendarRepository(private val context: Context) {
     /**
      * Returns all event instances overlapping the half-open range
      * [[start], [endExclusive]), expanded so that recurring events appear as
-     * individual occurrences.
+     * individual occurrences. When [calendarIds] is non-null, only events from
+     * those calendars are returned.
      */
     suspend fun eventsBetween(
         start: LocalDate,
         endExclusive: LocalDate,
+        calendarIds: Set<Long>? = null,
         zone: ZoneId = ZoneId.systemDefault(),
     ): List<CalendarEvent> = withContext(Dispatchers.IO) {
+        if (calendarIds != null && calendarIds.isEmpty()) return@withContext emptyList()
+
         val startMillis = start.atStartOfDay(zone).toInstant().toEpochMilli()
         val endMillis = endExclusive.atStartOfDay(zone).toInstant().toEpochMilli()
 
@@ -42,6 +46,7 @@ class CalendarRepository(private val context: Context) {
 
         val projection = arrayOf(
             CalendarContract.Instances.EVENT_ID,
+            CalendarContract.Instances.CALENDAR_ID,
             CalendarContract.Instances.TITLE,
             CalendarContract.Instances.BEGIN,
             CalendarContract.Instances.END,
@@ -50,10 +55,17 @@ class CalendarRepository(private val context: Context) {
             CalendarContract.Instances.DISPLAY_COLOR,
         )
 
+        val (selection, args) = calendarIds?.let { ids ->
+            val placeholders = ids.joinToString(",") { "?" }
+            "${CalendarContract.Instances.CALENDAR_ID} IN ($placeholders)" to
+                ids.map { it.toString() }.toTypedArray()
+        } ?: (null to null)
+
         val events = mutableListOf<CalendarEvent>()
-        resolver.query(uri, projection, null, null, CalendarContract.Instances.BEGIN)
+        resolver.query(uri, projection, selection, args, CalendarContract.Instances.BEGIN)
             ?.use { cursor ->
                 val idCol = cursor.getColumnIndexOrThrow(CalendarContract.Instances.EVENT_ID)
+                val calCol = cursor.getColumnIndexOrThrow(CalendarContract.Instances.CALENDAR_ID)
                 val titleCol = cursor.getColumnIndexOrThrow(CalendarContract.Instances.TITLE)
                 val beginCol = cursor.getColumnIndexOrThrow(CalendarContract.Instances.BEGIN)
                 val endCol = cursor.getColumnIndexOrThrow(CalendarContract.Instances.END)
@@ -64,6 +76,7 @@ class CalendarRepository(private val context: Context) {
                 while (cursor.moveToNext()) {
                     events += CalendarEvent(
                         id = cursor.getLong(idCol),
+                        calendarId = cursor.getLong(calCol),
                         title = cursor.getString(titleCol)?.takeIf { it.isNotBlank() }
                             ?: "(No title)",
                         startMillis = cursor.getLong(beginCol),
@@ -77,34 +90,98 @@ class CalendarRepository(private val context: Context) {
         events
     }
 
-    /** Convenience wrapper for a single day. */
-    suspend fun eventsOn(date: LocalDate, zone: ZoneId = ZoneId.systemDefault()): List<CalendarEvent> =
-        eventsBetween(date, date.plusDays(1), zone)
+    /** Lists every visible calendar on the device, primary ones first. */
+    suspend fun calendars(): List<CalendarInfo> = withContext(Dispatchers.IO) {
+        val projection = arrayOf(
+            CalendarContract.Calendars._ID,
+            CalendarContract.Calendars.CALENDAR_DISPLAY_NAME,
+            CalendarContract.Calendars.ACCOUNT_NAME,
+            CalendarContract.Calendars.CALENDAR_COLOR,
+            CalendarContract.Calendars.IS_PRIMARY,
+            CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL,
+        )
+        val order = "${CalendarContract.Calendars.IS_PRIMARY} DESC, " +
+            "${CalendarContract.Calendars.CALENDAR_DISPLAY_NAME} ASC"
+
+        val result = mutableListOf<CalendarInfo>()
+        resolver.query(
+            CalendarContract.Calendars.CONTENT_URI,
+            projection,
+            "${CalendarContract.Calendars.VISIBLE} = 1",
+            null,
+            order,
+        )?.use { cursor ->
+            val idCol = cursor.getColumnIndexOrThrow(CalendarContract.Calendars._ID)
+            val nameCol = cursor.getColumnIndexOrThrow(CalendarContract.Calendars.CALENDAR_DISPLAY_NAME)
+            val accountCol = cursor.getColumnIndexOrThrow(CalendarContract.Calendars.ACCOUNT_NAME)
+            val colorCol = cursor.getColumnIndexOrThrow(CalendarContract.Calendars.CALENDAR_COLOR)
+            val primaryCol = cursor.getColumnIndexOrThrow(CalendarContract.Calendars.IS_PRIMARY)
+            val accessCol = cursor.getColumnIndexOrThrow(CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL)
+
+            while (cursor.moveToNext()) {
+                result += CalendarInfo(
+                    id = cursor.getLong(idCol),
+                    displayName = cursor.getString(nameCol)?.takeIf { it.isNotBlank() }
+                        ?: "(Unnamed)",
+                    accountName = cursor.getString(accountCol).orEmpty(),
+                    color = cursor.getInt(colorCol),
+                    isPrimary = cursor.getInt(primaryCol) == 1,
+                    isWritable = cursor.getInt(accessCol) >=
+                        CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR,
+                )
+            }
+        }
+        result
+    }
 
     /**
-     * Inserts a timed event into the user's primary writable calendar and returns
-     * its new event id, or `null` if no writable calendar is available.
+     * Inserts a timed event and returns its new event id, or `null` if it could
+     * not be created. Uses [calendarId] when given, otherwise the primary
+     * writable calendar.
      */
     suspend fun addEvent(
         title: String,
         date: LocalDate,
         start: LocalTime,
         end: LocalTime,
+        calendarId: Long? = null,
         zone: ZoneId = ZoneId.systemDefault(),
     ): Long? = withContext(Dispatchers.IO) {
-        val calendarId = primaryCalendarId() ?: return@withContext null
-        val startMillis = date.atTime(start).atZone(zone).toInstant().toEpochMilli()
-        val endMillis = date.atTime(end).atZone(zone).toInstant().toEpochMilli()
-
+        val targetCalendar = calendarId ?: primaryCalendarId() ?: return@withContext null
         val values = ContentValues().apply {
-            put(CalendarContract.Events.CALENDAR_ID, calendarId)
+            put(CalendarContract.Events.CALENDAR_ID, targetCalendar)
             put(CalendarContract.Events.TITLE, title)
-            put(CalendarContract.Events.DTSTART, startMillis)
-            put(CalendarContract.Events.DTEND, endMillis)
+            put(CalendarContract.Events.DTSTART, date.atTime(start).atZone(zone).toInstant().toEpochMilli())
+            put(CalendarContract.Events.DTEND, date.atTime(end).atZone(zone).toInstant().toEpochMilli())
             put(CalendarContract.Events.EVENT_TIMEZONE, zone.id)
         }
         val uri = resolver.insert(CalendarContract.Events.CONTENT_URI, values)
         uri?.let { ContentUris.parseId(it) }
+    }
+
+    /** Updates an existing event's title and times. Returns true on success. */
+    suspend fun updateEvent(
+        eventId: Long,
+        title: String,
+        date: LocalDate,
+        start: LocalTime,
+        end: LocalTime,
+        zone: ZoneId = ZoneId.systemDefault(),
+    ): Boolean = withContext(Dispatchers.IO) {
+        val values = ContentValues().apply {
+            put(CalendarContract.Events.TITLE, title)
+            put(CalendarContract.Events.DTSTART, date.atTime(start).atZone(zone).toInstant().toEpochMilli())
+            put(CalendarContract.Events.DTEND, date.atTime(end).atZone(zone).toInstant().toEpochMilli())
+            put(CalendarContract.Events.EVENT_TIMEZONE, zone.id)
+        }
+        val uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId)
+        resolver.update(uri, values, null, null) > 0
+    }
+
+    /** Deletes an event by id. Returns true if a row was removed. */
+    suspend fun deleteEvent(eventId: Long): Boolean = withContext(Dispatchers.IO) {
+        val uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId)
+        resolver.delete(uri, null, null) > 0
     }
 
     /** The id of a writable calendar, preferring the account's primary one. */

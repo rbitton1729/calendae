@@ -10,48 +10,71 @@ import androidx.window.layout.FoldingFeature
 import androidx.window.layout.WindowInfoTracker
 import kotlinx.coroutines.flow.map
 
+/** How the calendar should arrange itself for the current device posture. */
+enum class Posture {
+    /** No fold (or non-separating): a single pane, or an even split if wide. */
+    FLAT,
+
+    /** Vertical fold: two facing pages side by side (a book). */
+    BOOK,
+
+    /** Horizontal fold: two stacked pages, screen above the hinge and below it. */
+    TABLETOP,
+}
+
 /**
- * Describes how the calendar should arrange itself for the current device posture.
+ * The current foldable posture plus the hinge geometry, expressed along the
+ * split axis (X for [Posture.BOOK], Y for [Posture.TABLETOP]).
  *
- * @property isBookSpread true when the window should be split into two facing
- *   pages (a vertical fold, or simply a wide window).
- * @property hingeStartPx left edge of the physical hinge, in window pixels, or
- *   `null` when there is no separating hinge (split the window evenly instead).
- * @property hingeWidthPx width of the hinge gutter, in window pixels.
+ * @property hingePositionPx start of the hinge along the split axis, in window
+ *   pixels, or `null` when there is no separating hinge.
+ * @property hingeThicknessPx size of the hinge gutter along the split axis.
  */
 data class FoldState(
-    val isBookSpread: Boolean,
-    val hingeStartPx: Int?,
-    val hingeWidthPx: Int,
+    val posture: Posture,
+    val hingePositionPx: Int?,
+    val hingeThicknessPx: Int,
 ) {
+    val isBook: Boolean get() = posture == Posture.BOOK
+    val isTabletop: Boolean get() = posture == Posture.TABLETOP
+
     companion object {
-        val Flat = FoldState(isBookSpread = false, hingeStartPx = null, hingeWidthPx = 0)
+        val Flat = FoldState(Posture.FLAT, hingePositionPx = null, hingeThicknessPx = 0)
     }
 }
 
 /**
  * Observes [WindowInfoTracker] and maps the current [FoldingFeature] to a
- * [FoldState]. A vertical fold yields a book spread with the gutter aligned to
- * the hinge; absent a fold we stay flat (the caller may still split a wide
- * window evenly).
+ * [FoldState]: a vertical fold becomes a [Posture.BOOK] spread and a horizontal
+ * fold a [Posture.TABLETOP] spread, each with the gutter aligned to the hinge.
  */
 @Composable
 fun rememberFoldState(): FoldState {
-    val activity = LocalActivity() ?: return FoldState.Flat
+    val activity = currentActivity() ?: return FoldState.Flat
     val flow = remember(activity) {
         WindowInfoTracker.getOrCreate(activity)
             .windowLayoutInfo(activity)
             .map { layoutInfo ->
                 val fold = layoutInfo.displayFeatures
                     .filterIsInstance<FoldingFeature>()
-                    .firstOrNull { it.orientation == FoldingFeature.Orientation.VERTICAL }
+                    .firstOrNull()
                     ?: return@map FoldState.Flat
 
-                FoldState(
-                    isBookSpread = true,
-                    hingeStartPx = fold.bounds.left,
-                    hingeWidthPx = fold.bounds.width(),
-                )
+                when (fold.orientation) {
+                    FoldingFeature.Orientation.VERTICAL -> FoldState(
+                        posture = Posture.BOOK,
+                        hingePositionPx = fold.bounds.left,
+                        hingeThicknessPx = fold.bounds.width(),
+                    )
+
+                    FoldingFeature.Orientation.HORIZONTAL -> FoldState(
+                        posture = Posture.TABLETOP,
+                        hingePositionPx = fold.bounds.top,
+                        hingeThicknessPx = fold.bounds.height(),
+                    )
+
+                    else -> FoldState.Flat
+                }
             }
     }
     return flow.collectAsStateWithLifecycle(initialValue = FoldState.Flat).value
@@ -59,7 +82,7 @@ fun rememberFoldState(): FoldState {
 
 /** Resolves the [Activity] backing the current composition, if any. */
 @Composable
-private fun LocalActivity(): Activity? {
+private fun currentActivity(): Activity? {
     var ctx: Context? = androidx.compose.ui.platform.LocalContext.current
     while (ctx is ContextWrapper) {
         if (ctx is Activity) return ctx

@@ -15,9 +15,6 @@ variables:
   # Android command-line tools build to bootstrap the SDK. Bump this if installing
   # SDK packages ever fails on a fresh runner.
   CMDLINE_TOOLS_VERSION: "11076708"
-  # curl reaches dl.google.com over IPv4 fine, but the build JVM hung on IPv6 fetching
-  # the SDK add-ons list (a multi-minute connect timeout). Force IPv4 for all JVMs.
-  JAVA_TOOL_OPTIONS: "-Djava.net.preferIPv4Stack=true"
 
 default:
   image: eclipse-temurin:21-jdk

@@ -12,18 +12,23 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -37,9 +42,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -52,21 +57,26 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.rbitton.calendae.data.CalendarEvent
+import com.rbitton.calendae.data.startDate
 import com.rbitton.calendae.fold.FoldState
-import com.rbitton.calendae.fold.Posture
 import com.rbitton.calendae.fold.rememberFoldState
 import kotlinx.coroutines.launch
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.YearMonth
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.Locale
@@ -82,6 +92,15 @@ private val CalendarPermissions = arrayOf(
     Manifest.permission.WRITE_CALENDAR,
 )
 
+/**
+ * A secondary surface that, on a folded phone, appears as a dialog — but when
+ * unfolded must instead occupy a book page (never a popup).
+ */
+private sealed interface Panel {
+    data class Editor(val event: CalendarEvent?) : Panel
+    data object Calendars : Panel
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
@@ -89,12 +108,15 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
     val foldState = rememberFoldState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val zone = ZoneId.systemDefault()
 
-    var editorOpen by remember { mutableStateOf(false) }
-    var editingEvent by remember { mutableStateOf<CalendarEvent?>(null) }
-    var calendarsOpen by remember { mutableStateOf(false) }
+    var panel by remember { mutableStateOf<Panel?>(null) }
     // Month paging direction: +1 slides the new page in from the right, -1 from the left.
     var navDirection by remember { mutableIntStateOf(1) }
+
+    // Unfolded (a real book/tabletop spread) => content splits at the hinge, never a popup.
+    val splitMode = foldState.isBook || foldState.isTabletop
+    val isWeek = state.viewMode == ViewMode.WEEK
 
     val windowStart = state.weekWindowStart
     fun indexOf(date: LocalDate) =
@@ -104,12 +126,10 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
         derivedStateOf { windowStart.plusDays(weekListState.firstVisibleItemIndex.toLong()) }
     }
 
-    // Scroll the timeline to the selected day whenever we (re)enter week view.
     LaunchedEffect(state.viewMode) {
         if (state.viewMode == ViewMode.WEEK) weekListState.scrollToItem(indexOf(state.selectedDate))
     }
 
-    val isWeek = state.viewMode == ViewMode.WEEK
     val goPrevious: () -> Unit = {
         if (isWeek) {
             scope.launch {
@@ -156,6 +176,42 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
         viewModel.onPermissionResult(granted)
     }
 
+    // An existing event is edited on its own day; a new event uses the selected day.
+    val editorDate = (panel as? Panel.Editor)?.event?.startDate(zone) ?: state.selectedDate
+
+    // Panel actions.
+    val dismissPanel = { panel = null }
+    val saveEvent: (String, LocalTime, LocalTime, Long?) -> Unit = { title, start, end, calendarId ->
+        (panel as? Panel.Editor)?.let { editor ->
+            val event = editor.event
+            if (event == null) viewModel.addEvent(title, state.selectedDate, start, end, calendarId)
+            else viewModel.updateEvent(event.id, title, event.startDate(zone), start, end)
+        }
+        panel = null
+    }
+    val deleteEvent = {
+        (panel as? Panel.Editor)?.event?.let { viewModel.deleteEvent(it.id) }
+        panel = null
+    }
+    val onEventClick: (CalendarEvent) -> Unit = { event ->
+        viewModel.selectDate(event.startDate(zone))
+        panel = Panel.Editor(event)
+    }
+
+    // When an event opens the split editor in week view, center its day in the left page.
+    val centeredEventId = (panel as? Panel.Editor)?.event?.id
+    LaunchedEffect(centeredEventId, splitMode, isWeek) {
+        val event = (panel as? Panel.Editor)?.event
+        if (event != null && isWeek && splitMode) {
+            val index = indexOf(event.startDate(zone))
+            weekListState.scrollToItem(index)
+            val info = weekListState.layoutInfo
+            val itemPx = info.visibleItemsInfo.firstOrNull { it.index == index }?.size ?: 0
+            val viewport = info.viewportEndOffset - info.viewportStartOffset
+            weekListState.animateScrollToItem(index, -((viewport - itemPx) / 2))
+        }
+    }
+
     val title = if (isWeek) weekVisibleDate.format(MonthTitleFormat)
     else state.visibleMonth.format(MonthTitleFormat)
 
@@ -168,105 +224,150 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
                 onPrevious = goPrevious,
                 onNext = goNext,
                 onToday = goToday,
-                onToggleView = {
-                    viewModel.setViewMode(if (isWeek) ViewMode.MONTH else ViewMode.WEEK)
-                },
-                onOpenCalendars = { calendarsOpen = true },
+                onToggleView = { viewModel.setViewMode(if (isWeek) ViewMode.MONTH else ViewMode.WEEK) },
+                onOpenCalendars = { panel = Panel.Calendars },
             )
         },
         floatingActionButton = {
-            if (state.hasPermission) {
+            // Hidden while a panel is open — you're already editing/adding.
+            if (state.hasPermission && panel == null) {
                 FloatingActionButton(onClick = {
                     if (isWeek) viewModel.selectDate(weekVisibleDate)
-                    editingEvent = null
-                    editorOpen = true
+                    panel = Panel.Editor(null)
                 }) {
                     Icon(Icons.Filled.Add, "Add event")
                 }
             }
         },
     ) { padding ->
-        val onEventClick: (CalendarEvent) -> Unit = { editingEvent = it; editorOpen = true }
+        val monthGrid: @Composable (Modifier) -> Unit = { mod ->
+            MonthGridPaged(state, navDirection, goPrevious, goNext, viewModel::selectDate, mod)
+        }
+        val weekTimeline: @Composable (Modifier) -> Unit = { mod ->
+            WeekTimeline(
+                listState = weekListState,
+                windowStart = windowStart,
+                dayCount = state.weekWindowDays,
+                selectedDate = state.selectedDate,
+                today = state.today,
+                eventsByDate = state.eventsByDate,
+                onDayClick = viewModel::selectDate,
+                onEventClick = onEventClick,
+                modifier = mod,
+            )
+        }
+        val agenda: @Composable () -> Unit = {
+            DayAgenda(
+                date = state.selectedDate,
+                events = state.selectedDayEvents,
+                onEventClick = onEventClick,
+                today = state.today,
+                modifier = Modifier.fillMaxSize().padding(top = 8.dp),
+            )
+        }
+
         Box(Modifier.padding(padding).fillMaxSize()) {
             when {
                 !state.hasPermission ->
                     PermissionGate(onGrant = { permissionLauncher.launch(CalendarPermissions) })
 
-                isWeek -> WeekTimeline(
-                    listState = weekListState,
-                    windowStart = windowStart,
-                    dayCount = state.weekWindowDays,
-                    selectedDate = state.selectedDate,
-                    today = state.today,
-                    eventsByDate = state.eventsByDate,
-                    onDayClick = viewModel::selectDate,
-                    onEventClick = onEventClick,
+                // Unfolded with a panel open: calendar on one page, panel on the other.
+                splitMode && panel != null -> SplitPane(
+                    foldState,
+                    first = { if (isWeek) weekTimeline(Modifier.fillMaxSize()) else monthGrid(Modifier.fillMaxSize()) },
+                    second = {
+                        PanelPane(panel!!, state, editorDate, dismissPanel, saveEvent, deleteEvent, viewModel::setCalendarEnabled)
+                    },
                 )
 
-                else -> MonthPager(
-                    state = state,
-                    foldState = foldState,
-                    navDirection = navDirection,
-                    onPrevious = goPrevious,
-                    onNext = goNext,
-                    onDateClick = viewModel::selectDate,
-                    onEventClick = onEventClick,
-                )
+                isWeek -> weekTimeline(Modifier.fillMaxSize())
+
+                // Unfolded month, no panel: month grid on one page, agenda on the other.
+                splitMode -> SplitPane(foldState, { monthGrid(Modifier.fillMaxSize()) }, agenda)
+
+                // Folded phone month: month grid stacked above the agenda.
+                else -> Column(Modifier.fillMaxSize()) {
+                    monthGrid(Modifier.fillMaxWidth())
+                    HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                    Box(Modifier.fillMaxWidth().weight(1f)) { agenda() }
+                }
             }
+
             if (state.hasPermission && state.loading) {
                 LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
             }
         }
     }
 
-    if (editorOpen) {
-        EventEditorDialog(
-            date = state.selectedDate,
-            event = editingEvent,
-            writableCalendars = state.calendars.filter { it.isWritable },
-            onDismiss = { editorOpen = false },
-            onSave = { eventTitle, start, end, calendarId ->
-                val event = editingEvent
-                if (event == null) viewModel.addEvent(eventTitle, state.selectedDate, start, end, calendarId)
-                else viewModel.updateEvent(event.id, eventTitle, state.selectedDate, start, end)
-                editorOpen = false
-            },
-            onDelete = {
-                editingEvent?.let { viewModel.deleteEvent(it.id) }
-                editorOpen = false
-            },
-        )
-    }
-
-    if (calendarsOpen) {
-        CalendarsDialog(
-            calendars = state.calendars,
-            enabledIds = state.enabledCalendarIds,
-            onToggle = viewModel::setCalendarEnabled,
-            onDismiss = { calendarsOpen = false },
-        )
+    // Popups are only ever shown on a folded phone — never when unfolded.
+    if (!splitMode) {
+        when (val current = panel) {
+            is Panel.Editor -> EventEditorDialog(
+                date = editorDate,
+                event = current.event,
+                writableCalendars = state.calendars.filter { it.isWritable },
+                onDismiss = dismissPanel,
+                onSave = saveEvent,
+                onDelete = deleteEvent,
+            )
+            Panel.Calendars -> CalendarsDialog(
+                calendars = state.calendars,
+                enabledIds = state.enabledCalendarIds,
+                onToggle = viewModel::setCalendarEnabled,
+                onDismiss = dismissPanel,
+            )
+            null -> Unit
+        }
     }
 }
 
-/**
- * The month view, paged and swipeable: navigating (by swipe or the arrows) slides
- * the old month out and the new one in, keyed by the visible month.
- */
+/** The secondary panel rendered as a book page (a [Surface] filling the page). */
 @Composable
-private fun MonthPager(
+private fun PanelPane(
+    panel: Panel,
     state: CalendarUiState,
-    foldState: FoldState,
+    editorDate: LocalDate,
+    onDismiss: () -> Unit,
+    onSave: (String, LocalTime, LocalTime, Long?) -> Unit,
+    onDelete: () -> Unit,
+    onToggleCalendar: (Long, Boolean) -> Unit,
+) {
+    Surface(Modifier.fillMaxSize(), tonalElevation = 1.dp) {
+        when (panel) {
+            is Panel.Editor -> EventEditorPaneContent(
+                date = editorDate,
+                event = panel.event,
+                writableCalendars = state.calendars.filter { it.isWritable },
+                onDismiss = onDismiss,
+                onSave = onSave,
+                onDelete = onDelete,
+            )
+            Panel.Calendars -> CalendarsPaneContent(
+                calendars = state.calendars,
+                enabledIds = state.enabledCalendarIds,
+                onToggle = onToggleCalendar,
+                onDismiss = onDismiss,
+            )
+        }
+    }
+}
+
+/** The month grid, paged and swipeable, animating between months. Grid only. */
+@Composable
+private fun MonthGridPaged(
+    state: CalendarUiState,
     navDirection: Int,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onDateClick: (LocalDate) -> Unit,
-    onEventClick: (CalendarEvent) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val latestPrev = rememberUpdatedState(onPrevious)
     val latestNext = rememberUpdatedState(onNext)
 
     AnimatedContent(
         targetState = state.visibleMonth,
+        modifier = modifier,
         transitionSpec = {
             val dir = navDirection
             (slideInHorizontally(tween(280)) { w -> dir * w } + fadeIn(tween(280)))
@@ -277,7 +378,7 @@ private fun MonthPager(
     ) { month ->
         Box(
             Modifier
-                .fillMaxSize()
+                .fillMaxWidth()
                 .pointerInput(Unit) {
                     var total = 0f
                     val threshold = 64.dp.toPx()
@@ -291,7 +392,14 @@ private fun MonthPager(
                     )
                 },
         ) {
-            MonthView(month, state, foldState, onDateClick, onEventClick)
+            MonthGrid(
+                month = month,
+                selectedDate = state.selectedDate,
+                today = state.today,
+                daysWithEvents = state.eventsByDate.keys,
+                onDateClick = onDateClick,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            )
         }
     }
 }
@@ -324,91 +432,74 @@ private fun CalendarTopBar(
     )
 }
 
-@Composable
-private fun MonthView(
-    month: YearMonth,
-    state: CalendarUiState,
-    foldState: FoldState,
-    onDateClick: (LocalDate) -> Unit,
-    onEventClick: (CalendarEvent) -> Unit,
-) {
-    val monthContent = @Composable {
-        MonthGrid(
-            month = month,
-            selectedDate = state.selectedDate,
-            today = state.today,
-            daysWithEvents = state.eventsByDate.keys,
-            onDateClick = onDateClick,
-            modifier = Modifier.fillMaxSize().padding(vertical = 8.dp),
-        )
-    }
-    val agenda = @Composable {
-        DayAgenda(
-            date = state.selectedDate,
-            events = state.selectedDayEvents,
-            onEventClick = onEventClick,
-            today = state.today,
-            modifier = Modifier.fillMaxSize().padding(top = 8.dp),
-        )
-    }
-
-    when (foldState.posture) {
-        Posture.BOOK, Posture.TABLETOP -> HingeSpread(foldState, monthContent, agenda)
-        Posture.FLAT -> Column(Modifier.fillMaxSize()) {
-            Box(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                MonthGrid(
-                    month = month,
-                    selectedDate = state.selectedDate,
-                    today = state.today,
-                    daysWithEvents = state.eventsByDate.keys,
-                    onDateClick = onDateClick,
-                )
-            }
-            HorizontalDivider(Modifier.padding(horizontal = 16.dp))
-            Box(Modifier.fillMaxWidth().weight(1f)) { agenda() }
-        }
-    }
-}
-
 /**
- * Two pages with the gutter aligned to the physical hinge: a Row for a book
- * (vertical) fold, a Column for a tabletop (horizontal) fold. Falls back to an
- * even split with a divider when no hinge position is reported.
+ * Two pages split at the hinge: a Row for a book (vertical) fold, a Column for a
+ * tabletop (horizontal) fold. The split starts aligned to the physical hinge (or
+ * centered if none) and can be dragged via the pill handle in the gutter.
  */
 @Composable
-private fun HingeSpread(
+private fun SplitPane(
     foldState: FoldState,
     first: @Composable () -> Unit,
     second: @Composable () -> Unit,
 ) {
+    val isTabletop = foldState.isTabletop
     val density = LocalDensity.current
-    val position = foldState.hingePositionPx
-    val thickness = with(density) { foldState.hingeThicknessPx.toDp() }
 
-    if (foldState.isTabletop) {
-        Column(Modifier.fillMaxSize()) {
-            if (position == null) {
-                Box(Modifier.fillMaxWidth().weight(1f)) { first() }
-                HorizontalDivider()
-                Box(Modifier.fillMaxWidth().weight(1f)) { second() }
-            } else {
-                Box(Modifier.fillMaxWidth().height(with(density) { position.toDp() })) { first() }
-                Spacer(Modifier.height(thickness))
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val total = if (isTabletop) maxHeight else maxWidth
+        val hingeThickness = with(density) { foldState.hingeThicknessPx.toDp() }
+        val gutter = maxOf(hingeThickness, 28.dp) // wide enough to grab
+        val minPane = 140.dp
+        val maxFirst = (total - gutter - minPane).coerceAtLeast(minPane)
+
+        // Initial split: gutter centered on the hinge, else an even split. Reset on refold.
+        val initialFirst = remember(foldState.hingePositionPx, isTabletop, total) {
+            val hingeStart = foldState.hingePositionPx?.let { with(density) { it.toDp() } - gutter / 2 }
+            (hingeStart ?: (total - gutter) / 2).coerceIn(minPane, maxFirst)
+        }
+        var firstSize by remember(foldState.hingePositionPx, isTabletop) { mutableStateOf(initialFirst) }
+        val clamped = firstSize.coerceIn(minPane, maxFirst)
+
+        // Accumulate onto the current size (not the captured `clamped`, which is stale
+        // inside the long-lived gesture coroutine and makes the handle jump).
+        val onDrag: (Float) -> Unit = { deltaPx ->
+            val delta = with(density) { deltaPx.toDp() }
+            firstSize = (firstSize + delta).coerceIn(minPane, maxFirst)
+        }
+
+        if (isTabletop) {
+            Column(Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxWidth().height(clamped)) { first() }
+                Gutter(isRow = false, thickness = gutter, onDrag = onDrag)
                 Box(Modifier.fillMaxWidth().weight(1f)) { second() }
             }
-        }
-    } else {
-        Row(Modifier.fillMaxSize()) {
-            if (position == null) {
-                Box(Modifier.weight(1f)) { first() }
-                VerticalDivider()
-                Box(Modifier.weight(1f)) { second() }
-            } else {
-                Box(Modifier.width(with(density) { position.toDp() })) { first() }
-                Spacer(Modifier.width(thickness))
-                Box(Modifier.weight(1f)) { second() }
+        } else {
+            Row(Modifier.fillMaxSize()) {
+                Box(Modifier.width(clamped).fillMaxHeight()) { first() }
+                Gutter(isRow = true, thickness = gutter, onDrag = onDrag)
+                Box(Modifier.weight(1f).fillMaxHeight()) { second() }
             }
         }
+    }
+}
+
+/** A draggable divider with a white-transparent pill handle in its center. */
+@Composable
+private fun Gutter(isRow: Boolean, thickness: Dp, onDrag: (Float) -> Unit) {
+    val sizeModifier = if (isRow) Modifier.width(thickness).fillMaxHeight()
+    else Modifier.height(thickness).fillMaxWidth()
+    val pill = if (isRow) Modifier.size(width = 4.dp, height = 40.dp)
+    else Modifier.size(width = 40.dp, height = 4.dp)
+
+    Box(
+        sizeModifier.pointerInput(isRow) {
+            if (isRow) detectHorizontalDragGestures { _, dragAmount -> onDrag(dragAmount) }
+            else detectVerticalDragGestures { _, dragAmount -> onDrag(dragAmount) }
+        },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(pill.clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.4f)))
     }
 }
 

@@ -4,6 +4,15 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -31,12 +41,17 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
@@ -48,17 +63,18 @@ import com.rbitton.calendae.data.CalendarEvent
 import com.rbitton.calendae.fold.FoldState
 import com.rbitton.calendae.fold.Posture
 import com.rbitton.calendae.fold.rememberFoldState
+import kotlinx.coroutines.launch
 import java.time.LocalDate
+import java.time.YearMonth
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 import java.util.Locale
 
 private val MonthTitleFormat: DateTimeFormatter =
     DateTimeFormatter.ofPattern("MMMM yyyy", Locale.getDefault())
-private val WeekTitleDay: DateTimeFormatter =
-    DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
 
-// In book posture the week is split 4 days / 3 days across the hinge.
-private const val WEEK_LEFT_DAYS = 4
+// One week's worth of day columns per arrow tap in the week timeline.
+private const val WEEK_STEP_DAYS = 7
 
 private val CalendarPermissions = arrayOf(
     Manifest.permission.READ_CALENDAR,
@@ -71,10 +87,60 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val foldState = rememberFoldState()
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     var editorOpen by remember { mutableStateOf(false) }
     var editingEvent by remember { mutableStateOf<CalendarEvent?>(null) }
     var calendarsOpen by remember { mutableStateOf(false) }
+    // Month paging direction: +1 slides the new page in from the right, -1 from the left.
+    var navDirection by remember { mutableIntStateOf(1) }
+
+    val windowStart = state.weekWindowStart
+    fun indexOf(date: LocalDate) =
+        ChronoUnit.DAYS.between(windowStart, date).toInt().coerceIn(0, state.weekWindowDays - 1)
+    val weekListState = rememberLazyListState(initialFirstVisibleItemIndex = indexOf(state.selectedDate))
+    val weekVisibleDate by remember {
+        derivedStateOf { windowStart.plusDays(weekListState.firstVisibleItemIndex.toLong()) }
+    }
+
+    // Scroll the timeline to the selected day whenever we (re)enter week view.
+    LaunchedEffect(state.viewMode) {
+        if (state.viewMode == ViewMode.WEEK) weekListState.scrollToItem(indexOf(state.selectedDate))
+    }
+
+    val isWeek = state.viewMode == ViewMode.WEEK
+    val goPrevious: () -> Unit = {
+        if (isWeek) {
+            scope.launch {
+                weekListState.animateScrollToItem(
+                    (weekListState.firstVisibleItemIndex - WEEK_STEP_DAYS).coerceAtLeast(0),
+                )
+            }
+        } else {
+            navDirection = -1; viewModel.goPrevious()
+        }
+    }
+    val goNext: () -> Unit = {
+        if (isWeek) {
+            scope.launch {
+                weekListState.animateScrollToItem(
+                    (weekListState.firstVisibleItemIndex + WEEK_STEP_DAYS)
+                        .coerceAtMost(state.weekWindowDays - 1),
+                )
+            }
+        } else {
+            navDirection = 1; viewModel.goNext()
+        }
+    }
+    val goToday: () -> Unit = {
+        if (isWeek) {
+            scope.launch { weekListState.animateScrollToItem(indexOf(state.today)) }
+            viewModel.goToToday()
+        } else {
+            navDirection = if (YearMonth.now().isBefore(state.visibleMonth)) -1 else 1
+            viewModel.goToToday()
+        }
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -89,37 +155,62 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
         viewModel.onPermissionResult(granted)
     }
 
+    val title = if (isWeek) weekVisibleDate.format(MonthTitleFormat)
+    else state.visibleMonth.format(MonthTitleFormat)
+
     Scaffold(
         topBar = {
             CalendarTopBar(
-                state = state,
-                onPrevious = viewModel::goPrevious,
-                onNext = viewModel::goNext,
-                onToday = viewModel::goToToday,
+                title = title,
+                isWeek = isWeek,
+                showCalendars = state.calendars.size > 1,
+                onPrevious = goPrevious,
+                onNext = goNext,
+                onToday = goToday,
                 onToggleView = {
-                    viewModel.setViewMode(
-                        if (state.viewMode == ViewMode.MONTH) ViewMode.WEEK else ViewMode.MONTH,
-                    )
+                    viewModel.setViewMode(if (isWeek) ViewMode.MONTH else ViewMode.WEEK)
                 },
                 onOpenCalendars = { calendarsOpen = true },
             )
         },
         floatingActionButton = {
             if (state.hasPermission) {
-                FloatingActionButton(onClick = { editingEvent = null; editorOpen = true }) {
+                FloatingActionButton(onClick = {
+                    if (isWeek) viewModel.selectDate(weekVisibleDate)
+                    editingEvent = null
+                    editorOpen = true
+                }) {
                     Icon(Icons.Filled.Add, "Add event")
                 }
             }
         },
     ) { padding ->
         val onEventClick: (CalendarEvent) -> Unit = { editingEvent = it; editorOpen = true }
-        Box(Modifier.padding(padding)) {
+        Box(Modifier.padding(padding).fillMaxSize()) {
             when {
-                !state.hasPermission -> PermissionGate(
-                    onGrant = { permissionLauncher.launch(CalendarPermissions) },
+                !state.hasPermission ->
+                    PermissionGate(onGrant = { permissionLauncher.launch(CalendarPermissions) })
+
+                isWeek -> WeekTimeline(
+                    listState = weekListState,
+                    windowStart = windowStart,
+                    dayCount = state.weekWindowDays,
+                    selectedDate = state.selectedDate,
+                    today = state.today,
+                    eventsByDate = state.eventsByDate,
+                    onDayClick = viewModel::selectDate,
+                    onEventClick = onEventClick,
                 )
-                state.viewMode == ViewMode.WEEK -> WeekView(state, foldState, viewModel, onEventClick)
-                else -> MonthView(state, foldState, viewModel, onEventClick)
+
+                else -> MonthPager(
+                    state = state,
+                    foldState = foldState,
+                    navDirection = navDirection,
+                    onPrevious = goPrevious,
+                    onNext = goNext,
+                    onDateClick = viewModel::selectDate,
+                    onEventClick = onEventClick,
+                )
             }
         }
     }
@@ -130,10 +221,10 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
             event = editingEvent,
             writableCalendars = state.calendars.filter { it.isWritable },
             onDismiss = { editorOpen = false },
-            onSave = { title, start, end, calendarId ->
+            onSave = { eventTitle, start, end, calendarId ->
                 val event = editingEvent
-                if (event == null) viewModel.addEvent(title, state.selectedDate, start, end, calendarId)
-                else viewModel.updateEvent(event.id, title, state.selectedDate, start, end)
+                if (event == null) viewModel.addEvent(eventTitle, state.selectedDate, start, end, calendarId)
+                else viewModel.updateEvent(event.id, eventTitle, state.selectedDate, start, end)
                 editorOpen = false
             },
             onDelete = {
@@ -153,10 +244,60 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
     }
 }
 
+/**
+ * The month view, paged and swipeable: navigating (by swipe or the arrows) slides
+ * the old month out and the new one in, keyed by the visible month.
+ */
+@Composable
+private fun MonthPager(
+    state: CalendarUiState,
+    foldState: FoldState,
+    navDirection: Int,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onDateClick: (LocalDate) -> Unit,
+    onEventClick: (CalendarEvent) -> Unit,
+) {
+    val latestPrev = rememberUpdatedState(onPrevious)
+    val latestNext = rememberUpdatedState(onNext)
+
+    AnimatedContent(
+        targetState = state.visibleMonth,
+        transitionSpec = {
+            val dir = navDirection
+            (slideInHorizontally(tween(280)) { w -> dir * w } + fadeIn(tween(280)))
+                .togetherWith(slideOutHorizontally(tween(280)) { w -> -dir * w } + fadeOut(tween(280)))
+                .using(SizeTransform(clip = false))
+        },
+        label = "month-page",
+    ) { month ->
+        Box(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    var total = 0f
+                    val threshold = 64.dp.toPx()
+                    detectHorizontalDragGestures(
+                        onDragStart = { total = 0f },
+                        onDragEnd = {
+                            if (total > threshold) latestPrev.value()
+                            else if (total < -threshold) latestNext.value()
+                        },
+                        onHorizontalDrag = { _, dragAmount -> total += dragAmount },
+                    )
+                },
+        ) {
+            MonthView(month, state, foldState, onDateClick, onEventClick)
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CalendarTopBar(
-    state: CalendarUiState,
+    title: String,
+    isWeek: Boolean,
+    showCalendars: Boolean,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onToday: () -> Unit,
@@ -164,14 +305,10 @@ private fun CalendarTopBar(
     onOpenCalendars: () -> Unit,
 ) {
     androidx.compose.material3.TopAppBar(
-        title = { Text(state.title()) },
+        title = { Text(title) },
         actions = {
-            TextButton(onClick = onToggleView) {
-                Text(if (state.viewMode == ViewMode.MONTH) "Week" else "Month")
-            }
-            if (state.calendars.size > 1) {
-                TextButton(onClick = onOpenCalendars) { Text("Calendars") }
-            }
+            TextButton(onClick = onToggleView) { Text(if (isWeek) "Month" else "Week") }
+            if (showCalendars) TextButton(onClick = onOpenCalendars) { Text("Calendars") }
             IconButton(onClick = onPrevious) {
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "Previous")
             }
@@ -183,29 +320,21 @@ private fun CalendarTopBar(
     )
 }
 
-private fun CalendarUiState.title(): String = when (viewMode) {
-    ViewMode.MONTH -> visibleMonth.format(MonthTitleFormat)
-    ViewMode.WEEK -> {
-        val start = weekStart
-        val end = weekStart.plusDays(6)
-        "${start.format(WeekTitleDay)} – ${end.format(WeekTitleDay)}"
-    }
-}
-
 @Composable
 private fun MonthView(
+    month: YearMonth,
     state: CalendarUiState,
     foldState: FoldState,
-    viewModel: CalendarViewModel,
+    onDateClick: (LocalDate) -> Unit,
     onEventClick: (CalendarEvent) -> Unit,
 ) {
-    val month = @Composable {
+    val monthContent = @Composable {
         MonthGrid(
-            month = state.visibleMonth,
+            month = month,
             selectedDate = state.selectedDate,
-            today = LocalDate.now(),
+            today = state.today,
             daysWithEvents = state.eventsByDate.keys,
-            onDateClick = viewModel::selectDate,
+            onDateClick = onDateClick,
             modifier = Modifier.fillMaxSize().padding(vertical = 8.dp),
         )
     }
@@ -219,47 +348,21 @@ private fun MonthView(
     }
 
     when (foldState.posture) {
-        Posture.BOOK, Posture.TABLETOP -> HingeSpread(foldState, month, agenda)
+        Posture.BOOK, Posture.TABLETOP -> HingeSpread(foldState, monthContent, agenda)
         Posture.FLAT -> Column(Modifier.fillMaxSize()) {
             Box(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                 MonthGrid(
-                    month = state.visibleMonth,
+                    month = month,
                     selectedDate = state.selectedDate,
-                    today = LocalDate.now(),
+                    today = state.today,
                     daysWithEvents = state.eventsByDate.keys,
-                    onDateClick = viewModel::selectDate,
+                    onDateClick = onDateClick,
                 )
             }
             HorizontalDivider(Modifier.padding(horizontal = 16.dp))
             Box(Modifier.fillMaxWidth().weight(1f)) { agenda() }
         }
     }
-}
-
-@Composable
-private fun WeekView(
-    state: CalendarUiState,
-    foldState: FoldState,
-    viewModel: CalendarViewModel,
-    onEventClick: (CalendarEvent) -> Unit,
-) {
-    val density = LocalDensity.current
-    val splitLeftDays = if (foldState.isBook) WEEK_LEFT_DAYS else null
-    val gutter = if (foldState.isBook) {
-        with(density) { foldState.hingeThicknessPx.toDp() }
-    } else 0.dp
-
-    WeekGrid(
-        days = state.weekDays,
-        eventsByDate = state.eventsByDate,
-        selectedDate = state.selectedDate,
-        today = LocalDate.now(),
-        onDayClick = viewModel::selectDate,
-        onEventClick = onEventClick,
-        leftDays = splitLeftDays,
-        gutterWidth = gutter,
-        modifier = Modifier.fillMaxSize(),
-    )
 }
 
 /**

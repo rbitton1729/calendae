@@ -2,7 +2,6 @@ package com.rbitton.calendae.ui.calendar
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,6 +22,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimeInput
+import androidx.compose.material3.TimePicker
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -45,13 +45,17 @@ import java.util.Locale
 
 private val EditorDateFormat: DateTimeFormatter =
     DateTimeFormatter.ofPattern("EEE, MMM d", Locale.getDefault())
+private val EditorTimeFormat: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault())
+
+/** Which time field a [TimePickerDialog] is currently editing, if any. */
+private enum class TimeField { NONE, START, END }
 
 /**
  * Create or edit an event. When [event] is null this is a new event on [date];
- * otherwise the fields are pre-filled and a Delete action is offered. New events
- * may choose a target calendar from [writableCalendars].
+ * otherwise the fields are pre-filled and a Delete action is offered. Times are
+ * chosen with the circular clock dial. New events may pick a target calendar.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EventEditorDialog(
     date: LocalDate,
@@ -63,15 +67,14 @@ fun EventEditorDialog(
     zone: ZoneId = ZoneId.systemDefault(),
 ) {
     val isEditing = event != null
-    val initialStart = remember { event?.startTime(zone) ?: LocalTime.now().withMinute(0) }
-    val initialEnd = remember { event?.endTime(zone) ?: initialStart.plusHours(1) }
 
     var title by remember { mutableStateOf(event?.title.orEmpty()) }
     var calendarId by remember {
         mutableStateOf(event?.calendarId ?: writableCalendars.firstOrNull()?.id)
     }
-    val startState = rememberTimePickerState(initialStart.hour, initialStart.minute, true)
-    val endState = rememberTimePickerState(initialEnd.hour, initialEnd.minute, true)
+    var start by remember { mutableStateOf(event?.startTime(zone) ?: LocalTime.now().withMinute(0)) }
+    var end by remember { mutableStateOf(event?.endTime(zone) ?: start.plusHours(1)) }
+    var editing by remember { mutableStateOf(TimeField.NONE) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -98,40 +101,98 @@ fun EventEditorDialog(
                     )
                     Spacer(Modifier.size(12.dp))
                 }
-                LabeledTimeField("Starts", startState)
-                Spacer(Modifier.size(8.dp))
-                LabeledTimeField("Ends", endState)
+                TimeRow("Starts", start.format(EditorTimeFormat)) { editing = TimeField.START }
+                TimeRow("Ends", end.format(EditorTimeFormat)) { editing = TimeField.END }
             }
         },
         confirmButton = {
             TextButton(
                 enabled = title.isNotBlank(),
                 onClick = {
-                    val start = LocalTime.of(startState.hour, startState.minute)
-                    var end = LocalTime.of(endState.hour, endState.minute)
-                    if (!end.isAfter(start)) end = start.plusHours(1)
-                    onSave(title.trim(), start, end, calendarId)
+                    val safeEnd = if (end.isAfter(start)) end else start.plusHours(1)
+                    onSave(title.trim(), start, safeEnd, calendarId)
                 },
             ) { Text(if (isEditing) "Save" else "Add") }
         },
         dismissButton = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (isEditing) {
-                    TextButton(onClick = onDelete) { Text("Delete") }
+                if (isEditing) TextButton(onClick = onDelete) { Text("Delete") }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        },
+    )
+
+    if (editing != TimeField.NONE) {
+        val initial = if (editing == TimeField.START) start else end
+        TimePickerDialog(
+            initial = initial,
+            onDismiss = { editing = TimeField.NONE },
+            onConfirm = { picked ->
+                if (editing == TimeField.START) {
+                    // Keep the original duration when shifting the start.
+                    val duration = java.time.Duration.between(start, end)
+                    start = picked
+                    end = picked.plus(duration)
+                } else {
+                    end = picked
+                }
+                editing = TimeField.NONE
+            },
+        )
+    }
+}
+
+/** A labeled, tappable row showing a chosen time. */
+@Composable
+private fun TimeRow(label: String, value: String, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Text(
+            value,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+/**
+ * A time picker presented as the circular clock dial, with a toggle to the
+ * keyboard text entry for those who prefer it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TimePickerDialog(
+    initial: LocalTime,
+    onDismiss: () -> Unit,
+    onConfirm: (LocalTime) -> Unit,
+) {
+    val state = rememberTimePickerState(initial.hour, initial.minute, is24Hour = true)
+    var dialMode by remember { mutableStateOf(true) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Select time") },
+        text = {
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                if (dialMode) TimePicker(state = state) else TimeInput(state = state)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(LocalTime.of(state.hour, state.minute)) }) { Text("OK") }
+        },
+        dismissButton = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { dialMode = !dialMode }) {
+                    Text(if (dialMode) "Keyboard" else "Clock")
                 }
                 TextButton(onClick = onDismiss) { Text("Cancel") }
             }
         },
     )
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun LabeledTimeField(label: String, state: androidx.compose.material3.TimePickerState) {
-    Column {
-        Text(label, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(bottom = 4.dp))
-        TimeInput(state = state)
-    }
 }
 
 @Composable

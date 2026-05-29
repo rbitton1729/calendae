@@ -21,10 +21,14 @@ import java.time.temporal.TemporalAdjusters
 
 enum class ViewMode { MONTH, WEEK }
 
+/** Half-width, in days, of the event window loaded for the free-scrolling week view. */
+const val WEEK_WINDOW_DAYS = 182L
+
 /** Immutable snapshot of everything the calendar screen renders. */
 data class CalendarUiState(
     val visibleMonth: YearMonth,
     val selectedDate: LocalDate,
+    val today: LocalDate,
     val viewMode: ViewMode = ViewMode.MONTH,
     val eventsByDate: Map<LocalDate, List<CalendarEvent>> = emptyMap(),
     val calendars: List<CalendarInfo> = emptyList(),
@@ -41,6 +45,12 @@ data class CalendarUiState(
 
     val weekDays: List<LocalDate>
         get() = (0L..6L).map { weekStart.plusDays(it) }
+
+    /** Index-0 date of the free-scrolling week timeline. */
+    val weekWindowStart: LocalDate get() = today.minusDays(WEEK_WINDOW_DAYS)
+
+    /** Total number of day columns in the week timeline. */
+    val weekWindowDays: Int get() = (WEEK_WINDOW_DAYS * 2 + 1).toInt()
 }
 
 class CalendarViewModel(app: Application) : AndroidViewModel(app) {
@@ -50,7 +60,7 @@ class CalendarViewModel(app: Application) : AndroidViewModel(app) {
     private val today: LocalDate = LocalDate.now()
 
     private val _state = MutableStateFlow(
-        CalendarUiState(visibleMonth = YearMonth.from(today), selectedDate = today),
+        CalendarUiState(visibleMonth = YearMonth.from(today), selectedDate = today, today = today),
     )
     val state: StateFlow<CalendarUiState> = _state.asStateFlow()
 
@@ -148,7 +158,8 @@ class CalendarViewModel(app: Application) : AndroidViewModel(app) {
             // Pad a week each side so adjacent-month grid cells show their events too.
             ViewMode.MONTH -> s.visibleMonth.atDay(1).minusDays(7) to
                 s.visibleMonth.atEndOfMonth().plusDays(8)
-            ViewMode.WEEK -> s.weekStart.minusDays(1) to s.weekStart.plusDays(8)
+            // Load the whole timeline window so free scrolling never hits empty days.
+            ViewMode.WEEK -> s.weekWindowStart to s.weekWindowStart.plusDays(s.weekWindowDays + 1L)
         }
         // Filtering is only needed when a strict subset of calendars is enabled.
         val filter = when {

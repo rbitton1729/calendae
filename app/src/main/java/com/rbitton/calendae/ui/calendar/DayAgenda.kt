@@ -29,13 +29,12 @@ import com.rbitton.calendae.data.CalendarEvent
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.time.format.FormatStyle
 import java.util.Locale
 
 private val DateHeaderFormat: DateTimeFormatter =
     DateTimeFormatter.ofPattern("EEEE, MMMM d", Locale.getDefault())
 private val TimeFormat: DateTimeFormatter =
-    DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT)
+    DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault())
 
 /**
  * The agenda for a single day: a header with the date, then a time-ordered list

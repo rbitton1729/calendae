@@ -33,6 +33,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.rbitton.calendae.data.CalendarEvent
@@ -243,3 +244,7 @@ internal fun ColorSwatch(argb: Int, size: Int = 14) {
 
 internal fun swatchColor(argb: Int): Color =
     if (argb != 0) Color(0xFF000000 or (argb.toLong() and 0xFFFFFF)) else Color(0xFF6650A4)
+
+/** A legible text/icon color (near-black or white) for content placed on [background]. */
+internal fun contentColorOn(background: Color): Color =
+    if (background.luminance() > 0.5f) Color(0xFF1A1A1A) else Color.White

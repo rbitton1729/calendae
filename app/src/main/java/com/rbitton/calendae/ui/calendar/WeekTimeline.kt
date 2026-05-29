@@ -27,6 +27,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,7 +40,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rbitton.calendae.data.CalendarEvent
+import kotlinx.coroutines.delay
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.TextStyle
 import java.util.Locale
@@ -74,6 +80,15 @@ fun WeekTimeline(
     // Open near 07:00 rather than at midnight.
     LaunchedEffect(Unit) { vScroll.scrollTo(with(density) { (HourHeight * 7).roundToPx() }) }
 
+    // Drives the "now" indicator; refreshes about once a minute.
+    var now by remember { mutableStateOf(LocalTime.now()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            now = LocalTime.now()
+            delay(60_000L)
+        }
+    }
+
     Row(modifier.fillMaxSize()) {
         Column(Modifier.width(AxisWidth).fillMaxHeight()) {
             Spacer(Modifier.height(HeaderHeight + AllDayHeight))
@@ -89,6 +104,7 @@ fun WeekTimeline(
                     isToday = date == today,
                     isSelected = date == selectedDate,
                     events = eventsByDate[date].orEmpty(),
+                    now = if (date == today) now else null,
                     vScroll = vScroll,
                     onDayClick = onDayClick,
                     onEventClick = onEventClick,
@@ -105,18 +121,24 @@ private fun DayColumn(
     isToday: Boolean,
     isSelected: Boolean,
     events: List<CalendarEvent>,
+    now: LocalTime?,
     vScroll: androidx.compose.foundation.ScrollState,
     onDayClick: (LocalDate) -> Unit,
     onEventClick: (CalendarEvent) -> Unit,
     zone: ZoneId,
 ) {
+    val todayTint = MaterialTheme.colorScheme.primary.copy(alpha = 0.05f)
     Row {
         Column(Modifier.width(DayWidth).fillMaxHeight()) {
             DayHeader(date, isToday, isSelected) { onDayClick(date) }
             AllDayBand(events.filter { it.allDay }, onEventClick)
             HorizontalDivider()
-            Box(Modifier.weight(1f).fillMaxWidth().verticalScroll(vScroll)) {
-                DayBody(date, events.filterNot { it.allDay }, onEventClick, zone)
+            Box(
+                Modifier.weight(1f).fillMaxWidth()
+                    .background(if (isToday) todayTint else Color.Transparent)
+                    .verticalScroll(vScroll),
+            ) {
+                DayBody(date, events.filterNot { it.allDay }, now, onEventClick, zone)
             }
         }
         VerticalDivider()
@@ -159,16 +181,17 @@ private fun DayHeader(date: LocalDate, isToday: Boolean, isSelected: Boolean, on
 private fun AllDayBand(events: List<CalendarEvent>, onEventClick: (CalendarEvent) -> Unit) {
     Box(Modifier.fillMaxWidth().height(AllDayHeight).padding(horizontal = 1.dp, vertical = 1.dp)) {
         events.firstOrNull()?.let { event ->
+            val background = swatchColor(event.color)
             Surface(
                 onClick = { onEventClick(event) },
-                color = swatchColor(event.color),
+                color = background,
                 shape = RoundedCornerShape(4.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
                     if (events.size > 1) "${event.title} +${events.size - 1}" else event.title,
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color.White,
+                    color = contentColorOn(background),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
@@ -182,6 +205,7 @@ private fun AllDayBand(events: List<CalendarEvent>, onEventClick: (CalendarEvent
 private fun DayBody(
     date: LocalDate,
     events: List<CalendarEvent>,
+    now: LocalTime?,
     onEventClick: (CalendarEvent) -> Unit,
     zone: ZoneId,
 ) {
@@ -191,9 +215,10 @@ private fun DayBody(
             val (startMin, endMin) = event.minuteRangeOn(date, zone)
             val top = HourHeight * (startMin / 60f)
             val blockHeight = (HourHeight * ((endMin - startMin) / 60f)).coerceAtLeast(20.dp)
+            val background = swatchColor(event.color)
             Surface(
                 onClick = { onEventClick(event) },
-                color = swatchColor(event.color),
+                color = background,
                 shape = RoundedCornerShape(4.dp),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp)
                     .offset(y = top).height(blockHeight),
@@ -201,13 +226,29 @@ private fun DayBody(
                 Text(
                     event.title,
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color.White,
+                    color = contentColorOn(background),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp),
                 )
             }
         }
+        if (now != null) NowLine(now)
+    }
+}
+
+/** A horizontal marker at the current time, drawn over today's column. */
+@Composable
+private fun NowLine(now: LocalTime) {
+    val minutes = now.hour * 60 + now.minute
+    val y = HourHeight * (minutes / 60f)
+    val color = MaterialTheme.colorScheme.error
+    Box(
+        Modifier.fillMaxWidth().offset(y = y),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Box(Modifier.size(7.dp).clip(CircleShape).background(color))
+        HorizontalDivider(thickness = 2.dp, color = color)
     }
 }
 

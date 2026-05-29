@@ -46,14 +46,26 @@ fun DayAgenda(
     events: List<CalendarEvent>,
     onEventClick: (CalendarEvent) -> Unit,
     modifier: Modifier = Modifier,
+    today: LocalDate = LocalDate.now(),
     zone: ZoneId = ZoneId.systemDefault(),
 ) {
     Column(modifier = modifier.padding(horizontal = 20.dp)) {
+        relativeLabel(date, today)?.let { label ->
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
         Text(
             text = date.format(DateHeaderFormat),
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(top = 8.dp, bottom = 12.dp),
+            modifier = Modifier.padding(
+                top = if (relativeLabel(date, today) != null) 0.dp else 8.dp,
+                bottom = 12.dp,
+            ),
         )
         if (events.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -103,6 +115,13 @@ private fun EventRow(event: CalendarEvent, zone: ZoneId, onClick: () -> Unit) {
             }
         }
     }
+}
+
+private fun relativeLabel(date: LocalDate, today: LocalDate): String? = when (date) {
+    today -> "Today"
+    today.plusDays(1) -> "Tomorrow"
+    today.minusDays(1) -> "Yesterday"
+    else -> null
 }
 
 private fun timeLabel(event: CalendarEvent, zone: ZoneId): String =

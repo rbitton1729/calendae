@@ -34,6 +34,7 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -212,6 +213,9 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
                     onEventClick = onEventClick,
                 )
             }
+            if (state.hasPermission && state.loading) {
+                LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
+            }
         }
     }
 
@@ -343,6 +347,7 @@ private fun MonthView(
             date = state.selectedDate,
             events = state.selectedDayEvents,
             onEventClick = onEventClick,
+            today = state.today,
             modifier = Modifier.fillMaxSize().padding(top = 8.dp),
         )
     }

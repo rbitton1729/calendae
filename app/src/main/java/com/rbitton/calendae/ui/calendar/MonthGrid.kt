@@ -1,5 +1,6 @@
 package com.rbitton.calendae.ui.calendar
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -118,6 +119,7 @@ private fun DayCell(
             onClick = onClick,
             color = if (isSelected) scheme.primary else scheme.surface,
             shape = CircleShape,
+            border = if (isToday && !isSelected) BorderStroke(1.5.dp, scheme.primary) else null,
             modifier = cellModifier,
         ) {
             Column(

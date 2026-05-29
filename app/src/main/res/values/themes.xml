@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.Calendae" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.Calendae" parent="android:Theme.Material.Light.NoActionBar">
+        <!-- Cold-start window + system splash background. Tracks day/night (see
+             values-night) so launch doesn't flash white before the dynamic-color
+             app surface paints. The splash icon defaults to the launcher icon. -->
+        <item name="android:windowBackground">@color/splash_background</item>
+        <item name="android:windowSplashScreenBackground">@color/splash_background</item>
+    </style>
 </resources>

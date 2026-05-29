@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark-mode launch background (≈ Material3 dark surface), so the cold-start
+         splash matches the app instead of flashing the light default. -->
+    <color name="splash_background">#FF1C1B1F</color>
+</resources>

@@ -1,6 +1,9 @@
 package com.rbitton.calendae.ui.calendar
 
+import android.Manifest
 import android.app.Application
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.rbitton.calendae.data.CalendarEvent
@@ -65,6 +68,22 @@ class CalendarViewModel(app: Application) : AndroidViewModel(app) {
     )
     val state: StateFlow<CalendarUiState> = _state.asStateFlow()
 
+    /** Guards against kicking off a second calendar load while one is already running. */
+    private var loadingCalendars = false
+
+    init {
+        // On a returning launch access is usually already granted, so start the calendar
+        // query here (as the VM is built) rather than waiting for the first frame's
+        // permission check — the IO is then in flight before the UI finishes composing.
+        val granted = ContextCompat.checkSelfPermission(
+            app, Manifest.permission.READ_CALENDAR,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            _state.update { it.copy(hasPermission = true) }
+            loadCalendars()
+        }
+    }
+
     fun onPermissionResult(granted: Boolean) {
         val changed = _state.value.hasPermission != granted
         _state.update { it.copy(hasPermission = granted) }
@@ -83,24 +102,10 @@ class CalendarViewModel(app: Application) : AndroidViewModel(app) {
         refresh()
     }
 
-    /** Moves backward by one month or one week, depending on the active view. */
-    fun goPrevious() = step(forward = false)
-
-    /** Moves forward by one month or one week, depending on the active view. */
-    fun goNext() = step(forward = true)
-
-    private fun step(forward: Boolean) {
-        val s = _state.value
-        when (s.viewMode) {
-            ViewMode.MONTH -> {
-                val month = if (forward) s.visibleMonth.plusMonths(1) else s.visibleMonth.minusMonths(1)
-                _state.update { it.copy(visibleMonth = month) }
-            }
-            ViewMode.WEEK -> {
-                val date = s.selectedDate.plusDays(if (forward) 7 else -7)
-                _state.update { it.copy(selectedDate = date, visibleMonth = YearMonth.from(date)) }
-            }
-        }
+    /** Loads [month] into the grid (the month pager drives this). Keeps the selected day. */
+    fun showMonth(month: YearMonth) {
+        if (month == _state.value.visibleMonth) return
+        _state.update { it.copy(visibleMonth = month) }
         refresh()
     }
 
@@ -141,11 +146,14 @@ class CalendarViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun loadCalendars() {
+        if (loadingCalendars) return // init and the permission callback can both ask
+        loadingCalendars = true
         viewModelScope.launch {
             val calendars = repository.calendars()
             _state.update {
                 it.copy(calendars = calendars, enabledCalendarIds = calendars.map { c -> c.id }.toSet())
             }
+            loadingCalendars = false
             refresh()
         }
     }
@@ -156,9 +164,10 @@ class CalendarViewModel(app: Application) : AndroidViewModel(app) {
         if (!s.hasPermission) return
 
         val (rangeStart, rangeEnd) = when (s.viewMode) {
-            // Pad a week each side so adjacent-month grid cells show their events too.
-            ViewMode.MONTH -> s.visibleMonth.atDay(1).minusDays(7) to
-                s.visibleMonth.atEndOfMonth().plusDays(8)
+            // Load the neighbouring months too (plus a week of grid padding), so the
+            // pager shows an adjacent month's events as you swipe to it, not after.
+            ViewMode.MONTH -> s.visibleMonth.minusMonths(1).atDay(1).minusDays(7) to
+                s.visibleMonth.plusMonths(1).atEndOfMonth().plusDays(8)
             // Load the whole timeline window so free scrolling never hits empty days.
             ViewMode.WEEK -> s.weekWindowStart to s.weekWindowStart.plusDays(s.weekWindowDays + 1L)
         }

@@ -4,14 +4,6 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.SizeTransform
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -28,6 +20,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.PagerState
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
@@ -58,8 +54,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -86,9 +82,15 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.Locale
+import kotlin.math.abs
 
 private val MonthTitleFormat: DateTimeFormatter =
     DateTimeFormatter.ofPattern("MMMM yyyy", Locale.getDefault())
+
+// The month pager fakes an endless range: a huge page count anchored so that page
+// [MonthPageCenter] is the month the app opened in.
+private const val MonthPageCount = 4001
+private const val MonthPageCenter = MonthPageCount / 2
 
 // One week's worth of day columns per arrow tap in the week timeline.
 private const val WEEK_STEP_DAYS = 7
@@ -118,8 +120,6 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
     val zone = ZoneId.systemDefault()
 
     var panel by remember { mutableStateOf<Panel?>(null) }
-    // Month paging direction: +1 slides the new page in from the right, -1 from the left.
-    var navDirection by remember { mutableIntStateOf(1) }
     // Bumped when the split pill is dragged closed, asking an open editor to commit.
     var commitSignal by remember { mutableIntStateOf(0) }
     // True only while a pull-to-refresh is in flight (so navigation loads don't show the spinner).
@@ -142,6 +142,35 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
         if (state.viewMode == ViewMode.WEEK) weekListState.scrollToItem(indexOf(state.selectedDate))
     }
 
+    // Month paging via a finger-tracking HorizontalPager. Page <-> month maps around a
+    // fixed anchor (the month the app opened in) so the range is effectively endless.
+    val monthAnchor = remember(state.today) { YearMonth.from(state.today) }
+    fun monthForPage(page: Int): YearMonth = monthAnchor.plusMonths((page - MonthPageCenter).toLong())
+    fun pageForMonth(month: YearMonth): Int =
+        MonthPageCenter + ChronoUnit.MONTHS.between(monthAnchor, month).toInt()
+    val monthPagerState = rememberPagerState(initialPage = pageForMonth(state.visibleMonth)) {
+        MonthPageCount
+    }
+
+    // Whichever month the pager rests on becomes the loaded month.
+    LaunchedEffect(monthPagerState) {
+        snapshotFlow { monthPagerState.settledPage }
+            .collect { page -> viewModel.showMonth(monthForPage(page)) }
+    }
+    // Month changes from elsewhere (Today, tapping a day, the week view) move the pager.
+    LaunchedEffect(monthPagerState) {
+        snapshotFlow { state.visibleMonth }.collect { month ->
+            val target = pageForMonth(month)
+            if (target != monthPagerState.currentPage && !monthPagerState.isScrollInProgress) {
+                if (abs(target - monthPagerState.currentPage) <= 2) {
+                    monthPagerState.animateScrollToPage(target)
+                } else {
+                    monthPagerState.scrollToPage(target)
+                }
+            }
+        }
+    }
+
     val goPrevious: () -> Unit = {
         if (isWeek) {
             scope.launch {
@@ -150,7 +179,9 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
                 )
             }
         } else {
-            navDirection = -1; viewModel.goPrevious()
+            scope.launch {
+                monthPagerState.animateScrollToPage((monthPagerState.currentPage - 1).coerceAtLeast(0))
+            }
         }
     }
     val goNext: () -> Unit = {
@@ -162,7 +193,11 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
                 )
             }
         } else {
-            navDirection = 1; viewModel.goNext()
+            scope.launch {
+                monthPagerState.animateScrollToPage(
+                    (monthPagerState.currentPage + 1).coerceAtMost(MonthPageCount - 1),
+                )
+            }
         }
     }
     val goToday: () -> Unit = {
@@ -170,7 +205,7 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
             scope.launch { weekListState.animateScrollToItem(indexOf(state.today)) }
             viewModel.goToToday()
         } else {
-            navDirection = if (YearMonth.now().isBefore(state.visibleMonth)) -1 else 1
+            // Sets visibleMonth + selectedDate to today; the sync effect moves the pager.
             viewModel.goToToday()
         }
     }
@@ -236,8 +271,9 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
         }
     }
 
+    // In month view the title follows the pager so it updates mid-swipe.
     val title = if (isWeek) weekVisibleDate.format(MonthTitleFormat)
-    else state.visibleMonth.format(MonthTitleFormat)
+    else monthForPage(monthPagerState.currentPage).format(MonthTitleFormat)
 
     Scaffold(
         topBar = {
@@ -265,7 +301,7 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
         },
     ) { padding ->
         val monthGrid: @Composable (Modifier) -> Unit = { mod ->
-            MonthGridPaged(state, navDirection, goPrevious, goNext, viewModel::selectDate, mod)
+            MonthGridPaged(monthPagerState, ::monthForPage, state, viewModel::selectDate, mod)
         }
         val weekTimeline: @Composable (Modifier) -> Unit = { mod ->
             WeekTimeline(
@@ -326,9 +362,11 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
                 // Folded phone week: full timeline (panel shows as a popup).
                 isWeek -> weekTimeline(Modifier.fillMaxSize())
 
-                // Folded phone month: month grid stacked above the agenda.
+                // Folded phone month: month grid stacked above the agenda, the two
+                // sharing the screen height so the grid fills its half (not just a
+                // band of squares).
                 else -> Column(Modifier.fillMaxSize()) {
-                    monthGrid(Modifier.fillMaxWidth())
+                    Box(Modifier.fillMaxWidth().weight(1f)) { monthGrid(Modifier.fillMaxSize()) }
                     HorizontalDivider(Modifier.padding(horizontal = 16.dp))
                     Box(Modifier.fillMaxWidth().weight(1f)) { agenda() }
                 }
@@ -395,55 +433,35 @@ private fun PanelPane(
     }
 }
 
-/** The month grid, paged and swipeable, animating between months. Grid only. */
+/**
+ * The month grid as a finger-tracking pager: one month per page, snapping like the
+ * week view. [monthForPage] maps a page index to the month it shows.
+ */
 @Composable
 private fun MonthGridPaged(
+    pagerState: PagerState,
+    monthForPage: (Int) -> YearMonth,
     state: CalendarUiState,
-    navDirection: Int,
-    onPrevious: () -> Unit,
-    onNext: () -> Unit,
     onDateClick: (LocalDate) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val latestPrev = rememberUpdatedState(onPrevious)
-    val latestNext = rememberUpdatedState(onNext)
-
-    AnimatedContent(
-        targetState = state.visibleMonth,
-        modifier = modifier,
-        transitionSpec = {
-            val dir = navDirection
-            (slideInHorizontally(tween(280)) { w -> dir * w } + fadeIn(tween(280)))
-                .togetherWith(slideOutHorizontally(tween(280)) { w -> -dir * w } + fadeOut(tween(280)))
-                .using(SizeTransform(clip = false))
-        },
-        label = "month-page",
-    ) { month ->
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .pointerInput(Unit) {
-                    var total = 0f
-                    val threshold = 64.dp.toPx()
-                    detectHorizontalDragGestures(
-                        onDragStart = { total = 0f },
-                        onDragEnd = {
-                            if (total > threshold) latestPrev.value()
-                            else if (total < -threshold) latestNext.value()
-                        },
-                        onHorizontalDrag = { _, dragAmount -> total += dragAmount },
-                    )
-                },
-        ) {
-            MonthGrid(
-                month = month,
-                selectedDate = state.selectedDate,
-                today = state.today,
-                daysWithEvents = state.eventsByDate.keys,
-                onDateClick = onDateClick,
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-            )
-        }
+    HorizontalPager(
+        state = pagerState,
+        modifier = modifier.fillMaxSize(),
+        beyondViewportPageCount = 1, // keep neighbours composed so swipes start clean
+        // Commit to the next month after a short drag (default needs a half-page), so a
+        // light flick changes months the way a native pager does.
+        flingBehavior = PagerDefaults.flingBehavior(state = pagerState, snapPositionalThreshold = 0.25f),
+        key = { it },
+    ) { page ->
+        MonthGrid(
+            month = monthForPage(page),
+            selectedDate = state.selectedDate,
+            today = state.today,
+            eventsByDate = state.eventsByDate,
+            onDateClick = onDateClick,
+            modifier = Modifier.fillMaxSize().padding(vertical = 8.dp),
+        )
     }
 }
 

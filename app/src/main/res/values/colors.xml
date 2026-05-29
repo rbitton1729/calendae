@@ -8,4 +8,6 @@
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
     <color name="ic_launcher_background">#1A2332</color>
+    <!-- Light-mode launch background (≈ Material3 light surface). Dark in values-night. -->
+    <color name="splash_background">#FFFFFBFE</color>
 </resources>

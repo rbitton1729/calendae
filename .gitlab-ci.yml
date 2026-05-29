@@ -1,0 +1,53 @@
+# CI pipeline: builds a debug APK and exposes it as a downloadable artifact.
+#
+# Requires a GitLab runner with the Docker executor. After a green pipeline, grab
+# the APK from the job's "Browse"/"Download" artifacts, or from
+#   Build > Artifacts, or the "build:debug" job page.
+
+stages:
+  - build
+
+variables:
+  # JDK 21 base image matches the daemon JVM pinned in gradle/gradle-daemon-jvm.properties
+  # (toolchainVersion=21), so Gradle won't try to provision another JDK.
+  ANDROID_HOME: "$CI_PROJECT_DIR/.android-sdk"
+  GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
+  # Android command-line tools build to bootstrap the SDK. Bump this if installing
+  # SDK packages ever fails on a fresh runner.
+  CMDLINE_TOOLS_VERSION: "11076708"
+
+default:
+  image: eclipse-temurin:21-jdk
+  # Cache the Gradle home and SDK across runs (all under the project dir so GitLab can cache them).
+  cache:
+    key: "android-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .gradle/caches/
+      - .gradle/wrapper/
+      - .android-sdk/
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends unzip curl > /dev/null
+    - export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+    # Install the command-line tools only if not already restored from cache.
+    - |
+      if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+        echo "Installing Android command-line tools ($CMDLINE_TOOLS_VERSION)…"
+        mkdir -p "$ANDROID_HOME/cmdline-tools"
+        curl -sSL "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_VERSION}_latest.zip" -o /tmp/cmdline-tools.zip
+        unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools"
+        mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+      fi
+    - yes | sdkmanager --licenses > /dev/null || true
+    # Components matching app/build.gradle.kts (compileSdk 36.1) and the installed build-tools.
+    - sdkmanager --install "platform-tools" "platforms;android-36.1" "build-tools;37.0.0" > /dev/null
+    - chmod +x ./gradlew
+
+build:debug:
+  stage: build
+  script:
+    - ./gradlew --no-daemon assembleDebug
+  artifacts:
+    name: "calendae-debug-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - app/build/outputs/apk/debug/app-debug.apk
+    expire_in: 4 weeks

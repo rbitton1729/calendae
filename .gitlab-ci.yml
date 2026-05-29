@@ -49,16 +49,13 @@ build:debug:
   stage: build
   script:
     - ./gradlew --no-daemon assembleDebug
-    # Copy the APK to the repo root with a clean, versioned name so it isn't buried
-    # under app/build/outputs/... in the artifacts browser.
-    - |
-      VERSION=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts || echo "0.0")
-      APK="Calendae-${VERSION}-${CI_COMMIT_SHORT_SHA}-debug.apk"
-      cp app/build/outputs/apk/debug/app-debug.apk "$APK"
-      echo "Artifact: $APK"
+    # Copy the APK to the repo root with a clean, commit-stamped name so it isn't
+    # buried under app/build/outputs/... in the artifacts browser. The path below
+    # must be literal (no glob) for expose_as, so use the CI_COMMIT_SHORT_SHA variable.
+    - cp app/build/outputs/apk/debug/app-debug.apk "Calendae-$CI_COMMIT_SHORT_SHA-debug.apk"
   artifacts:
     name: "Calendae-$CI_COMMIT_SHORT_SHA-debug"
     expose_as: "Debug APK"
     paths:
-      - "Calendae-*-debug.apk"
+      - "Calendae-$CI_COMMIT_SHORT_SHA-debug.apk"
     expire_in: 4 weeks

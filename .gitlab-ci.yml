@@ -15,6 +15,9 @@ variables:
   # Android command-line tools build to bootstrap the SDK. Bump this if installing
   # SDK packages ever fails on a fresh runner.
   CMDLINE_TOOLS_VERSION: "11076708"
+  # curl reaches dl.google.com over IPv4 fine, but the build JVM hung on IPv6 fetching
+  # the SDK add-ons list (a multi-minute connect timeout). Force IPv4 for all JVMs.
+  JAVA_TOOL_OPTIONS: "-Djava.net.preferIPv4Stack=true"
 
 default:
   image: eclipse-temurin:21-jdk
@@ -46,8 +49,16 @@ build:debug:
   stage: build
   script:
     - ./gradlew --no-daemon assembleDebug
+    # Copy the APK to the repo root with a clean, versioned name so it isn't buried
+    # under app/build/outputs/... in the artifacts browser.
+    - |
+      VERSION=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts || echo "0.0")
+      APK="Calendae-${VERSION}-${CI_COMMIT_SHORT_SHA}-debug.apk"
+      cp app/build/outputs/apk/debug/app-debug.apk "$APK"
+      echo "Artifact: $APK"
   artifacts:
-    name: "calendae-debug-$CI_COMMIT_SHORT_SHA"
+    name: "Calendae-$CI_COMMIT_SHORT_SHA-debug"
+    expose_as: "Debug APK"
     paths:
-      - app/build/outputs/apk/debug/app-debug.apk
+      - "Calendae-*-debug.apk"
     expire_in: 4 weeks

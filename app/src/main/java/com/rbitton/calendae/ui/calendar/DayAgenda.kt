@@ -26,6 +26,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.rbitton.calendae.data.CalendarEvent
+import com.rbitton.calendae.data.endDateInclusive
+import com.rbitton.calendae.data.startDate
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -78,7 +80,7 @@ fun DayAgenda(
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(events, key = { it.id }) { event ->
-                    EventRow(event, zone, onClick = { onEventClick(event) })
+                    EventRow(event, date, zone, onClick = { onEventClick(event) })
                 }
             }
         }
@@ -86,7 +88,7 @@ fun DayAgenda(
 }
 
 @Composable
-private fun EventRow(event: CalendarEvent, zone: ZoneId, onClick: () -> Unit) {
+private fun EventRow(event: CalendarEvent, date: LocalDate, zone: ZoneId, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -108,7 +110,7 @@ private fun EventRow(event: CalendarEvent, zone: ZoneId, onClick: () -> Unit) {
                     fontWeight = FontWeight.Medium,
                 )
                 Text(
-                    text = timeLabel(event, zone),
+                    text = timeLabel(event, date, zone),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -124,6 +126,16 @@ private fun relativeLabel(date: LocalDate, today: LocalDate): String? = when (da
     else -> null
 }
 
-private fun timeLabel(event: CalendarEvent, zone: ZoneId): String =
-    if (event.allDay) "All day"
-    else "${event.startTime(zone).format(TimeFormat)} – ${event.endTime(zone).format(TimeFormat)}"
+private fun timeLabel(event: CalendarEvent, date: LocalDate, zone: ZoneId): String {
+    if (event.allDay) return "All day"
+    val start = event.startTime(zone).format(TimeFormat)
+    val end = event.endTime(zone).format(TimeFormat)
+    val startsBefore = event.startDate(zone).isBefore(date)
+    val endsAfter = event.endDateInclusive(zone).isAfter(date)
+    return when {
+        startsBefore && endsAfter -> "All day"      // spans this whole day
+        startsBefore -> "until $end"                 // continued from a previous day
+        endsAfter -> "from $start"                   // continues into the next day
+        else -> "$start – $end"
+    }
+}

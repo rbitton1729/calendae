@@ -33,8 +33,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -42,6 +46,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -117,6 +122,9 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
     var navDirection by remember { mutableIntStateOf(1) }
     // Bumped when the split pill is dragged closed, asking an open editor to commit.
     var commitSignal by remember { mutableIntStateOf(0) }
+    // True only while a pull-to-refresh is in flight (so navigation loads don't show the spinner).
+    var pullRefreshing by remember { mutableStateOf(false) }
+    LaunchedEffect(state.loading) { if (!state.loading) pullRefreshing = false }
 
     // Unfolded (a real book/tabletop spread) => content splits at the hinge, never a popup.
     val splitMode = foldState.isBook || foldState.isTabletop
@@ -236,12 +244,12 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
             CalendarTopBar(
                 title = title,
                 isWeek = isWeek,
-                showCalendars = state.calendars.size > 1,
                 onPrevious = goPrevious,
                 onNext = goNext,
                 onToday = goToday,
                 onToggleView = { viewModel.setViewMode(if (isWeek) ViewMode.MONTH else ViewMode.WEEK) },
                 onOpenCalendars = { panel = Panel.Calendars },
+                onRefresh = viewModel::refresh,
             )
         },
         floatingActionButton = {
@@ -297,7 +305,11 @@ fun CalendarScreen(viewModel: CalendarViewModel = viewModel()) {
             else -> null
         }
 
-        Box(Modifier.padding(padding).fillMaxSize()) {
+        PullToRefreshBox(
+            isRefreshing = pullRefreshing,
+            onRefresh = { pullRefreshing = true; viewModel.refresh() },
+            modifier = Modifier.padding(padding).fillMaxSize(),
+        ) {
             when {
                 !state.hasPermission ->
                     PermissionGate(onGrant = { permissionLauncher.launch(CalendarPermissions) })
@@ -440,24 +452,42 @@ private fun MonthGridPaged(
 private fun CalendarTopBar(
     title: String,
     isWeek: Boolean,
-    showCalendars: Boolean,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onToday: () -> Unit,
     onToggleView: () -> Unit,
     onOpenCalendars: () -> Unit,
+    onRefresh: () -> Unit,
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
     androidx.compose.material3.TopAppBar(
         title = { Text(title) },
         actions = {
             TextButton(onClick = onToggleView) { Text(if (isWeek) "Month" else "Week") }
-            if (showCalendars) TextButton(onClick = onOpenCalendars) { Text("Calendars") }
             IconButton(onClick = onPrevious) {
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "Previous")
             }
             TextButton(onClick = onToday) { Text("Today") }
             IconButton(onClick = onNext) {
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Next")
+            }
+            Box {
+                IconButton(onClick = { menuOpen = true }) { Icon(Icons.Filled.MoreVert, "More") }
+                DropdownMenu(
+                    expanded = menuOpen,
+                    onDismissRequest = { menuOpen = false },
+                    modifier = Modifier.width(200.dp),
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Refresh") },
+                        leadingIcon = { Icon(Icons.Filled.Refresh, null) },
+                        onClick = { menuOpen = false; onRefresh() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Calendars") },
+                        onClick = { menuOpen = false; onOpenCalendars() },
+                    )
+                }
             }
         },
     )

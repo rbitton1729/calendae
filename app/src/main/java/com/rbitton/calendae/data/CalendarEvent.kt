@@ -34,3 +34,10 @@ data class CalendarEvent(
 /** The local date an event begins on, in the given [zone]. */
 fun CalendarEvent.startDate(zone: ZoneId): LocalDate =
     Instant.ofEpochMilli(startMillis).atZone(zone).toLocalDate()
+
+/**
+ * The last local date the event still occupies. End is exclusive, so an event
+ * finishing exactly at midnight stays on the previous day (not the next).
+ */
+fun CalendarEvent.endDateInclusive(zone: ZoneId): LocalDate =
+    Instant.ofEpochMilli((endMillis - 1).coerceAtLeast(startMillis)).atZone(zone).toLocalDate()

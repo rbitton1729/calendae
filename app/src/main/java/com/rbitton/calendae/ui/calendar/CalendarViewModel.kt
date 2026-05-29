@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.rbitton.calendae.data.CalendarEvent
 import com.rbitton.calendae.data.CalendarInfo
 import com.rbitton.calendae.data.CalendarRepository
+import com.rbitton.calendae.data.endDateInclusive
 import com.rbitton.calendae.data.startDate
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -171,9 +172,19 @@ class CalendarViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _state.update { it.copy(loading = true) }
             val events = repository.eventsBetween(rangeStart, rangeEnd, filter, zone)
-            val byDate = events.groupBy { it.startDate(zone) }
-                .mapValues { (_, list) -> list.sortedBy { it.sortKey } }
-            _state.update { it.copy(eventsByDate = byDate, loading = false) }
+            // Put each event on every day it spans, so overnight/multi-day events
+            // appear on the following day(s), not just their start day.
+            val byDate = HashMap<LocalDate, MutableList<CalendarEvent>>()
+            events.forEach { event ->
+                var day = event.startDate(zone)
+                val last = event.endDateInclusive(zone)
+                while (!day.isAfter(last)) {
+                    byDate.getOrPut(day) { mutableListOf() }.add(event)
+                    day = day.plusDays(1)
+                }
+            }
+            val sorted = byDate.mapValues { (_, list) -> list.sortedBy { it.sortKey } }
+            _state.update { it.copy(eventsByDate = sorted, loading = false) }
         }
     }
 }

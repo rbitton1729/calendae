@@ -104,10 +104,13 @@ class CalendarRepository(private val context: Context) {
             "${CalendarContract.Calendars.CALENDAR_DISPLAY_NAME} ASC"
 
         val result = mutableListOf<CalendarInfo>()
+        // List every calendar (not just system-VISIBLE ones); Calendae manages its
+        // own per-calendar visibility, and events are shown regardless of the
+        // system flag, so the list must match what actually appears.
         resolver.query(
             CalendarContract.Calendars.CONTENT_URI,
             projection,
-            "${CalendarContract.Calendars.VISIBLE} = 1",
+            null,
             null,
             order,
         )?.use { cursor ->
